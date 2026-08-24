@@ -202,32 +202,48 @@ enum PDFMasker {
                 throw MaskerError.cannotCreateOutput(outputURL)
             }
 
-            for pageIndex in 0..<document.pageCount {
-                autoreleasepool {
-                    progress("Sanitizing \(fileURL.lastPathComponent), page \(pageIndex + 1) of \(document.pageCount)")
-                    guard let page = document.page(at: pageIndex) else { return }
-                    let displayRect = displayBounds(for: page)
-                    var pageRect = CGRect(origin: .zero, size: displayRect.size)
-                    let mediaBoxData = Data(bytes: &pageRect, count: MemoryLayout<CGRect>.size)
-                    let pageInfo = [kCGPDFContextMediaBox: mediaBoxData] as CFDictionary
-                    context.beginPDFPage(pageInfo)
+            do {
+                for pageIndex in 0..<document.pageCount {
+                    try autoreleasepool {
+                        progress("Sanitizing \(fileURL.lastPathComponent), page \(pageIndex + 1) of \(document.pageCount)")
+                        guard let page = document.page(at: pageIndex) else {
+                            throw MaskerError.cannotRender(page: pageIndex, file: fileURL)
+                        }
+                        let displayRect = displayBounds(for: page)
+                        var pageRect = CGRect(origin: .zero, size: displayRect.size)
+                        let mediaBoxData = Data(bytes: &pageRect, count: MemoryLayout<CGRect>.size)
+                        let pageInfo = [kCGPDFContextMediaBox: mediaBoxData] as CFDictionary
+                        context.beginPDFPage(pageInfo)
 
-                    let redactionRects = fileMatches
-                        .filter { $0.pageIndex == pageIndex }
-                        .flatMap(\.rects)
+                        let redactionRects = fileMatches
+                            .filter { $0.pageIndex == pageIndex }
+                            .flatMap(\.rects)
 
-                    if let image = renderPage(page, dpi: dpi, redactionRects: redactionRects) {
+                        guard let image = renderPage(page, dpi: dpi, redactionRects: redactionRects) else {
+                            context.endPDFPage()
+                            throw MaskerError.cannotRender(page: pageIndex, file: fileURL)
+                        }
                         context.saveGState()
                         context.interpolationQuality = .high
                         context.draw(image, in: pageRect)
                         context.restoreGState()
+                        context.endPDFPage()
                     }
-                    context.endPDFPage()
                 }
+                context.closePDF()
+            } catch {
+                context.closePDF()
+                try? FileManager.default.removeItem(at: outputURL)
+                throw error
             }
-            context.closePDF()
 
-            guard validateSanitizedOutput(outputURL, expectedPageCount: document.pageCount) else {
+            progress("Visually validating \(fileURL.lastPathComponent)")
+            guard validateSanitizedOutput(
+                outputURL,
+                sourceDocument: document,
+                matches: fileMatches
+            ) else {
+                try? FileManager.default.removeItem(at: outputURL)
                 throw MaskerError.outputValidationFailed(outputURL)
             }
             outputs.append(outputURL)
@@ -788,8 +804,23 @@ enum PDFMasker {
         bitmap.fill(CGRect(origin: .zero, size: displaySize))
 
         bitmap.saveGState()
-        bitmap.translateBy(x: -transformedBounds.minX, y: -transformedBounds.minY)
-        page.draw(with: .mediaBox, to: bitmap)
+        if let pageRef = page.pageRef {
+            let target = CGRect(origin: .zero, size: displaySize)
+            let drawingTransform = pageRef.getDrawingTransform(
+                .mediaBox,
+                rect: target,
+                rotate: 0,
+                preserveAspectRatio: true
+            )
+            bitmap.concatenate(drawingTransform)
+            bitmap.drawPDFPage(pageRef)
+            for annotation in page.annotations where annotation.shouldDisplay || annotation.shouldPrint {
+                annotation.draw(with: .mediaBox, in: bitmap)
+            }
+        } else {
+            bitmap.translateBy(x: -transformedBounds.minX, y: -transformedBounds.minY)
+            page.draw(with: .mediaBox, to: bitmap)
+        }
         bitmap.restoreGState()
 
         if !redactionRects.isEmpty {
@@ -801,18 +832,75 @@ enum PDFMasker {
         return bitmap.makeImage()
     }
 
-    private static func validateSanitizedOutput(_ url: URL, expectedPageCount: Int) -> Bool {
-        guard let output = PDFDocument(url: url), output.pageCount == expectedPageCount else { return false }
+    static func validateSanitizedOutput(
+        _ url: URL,
+        sourceDocument: PDFDocument,
+        matches: [RedactionMatch]
+    ) -> Bool {
+        guard let output = PDFDocument(url: url), output.pageCount == sourceDocument.pageCount else { return false }
         for index in 0..<output.pageCount {
-            guard let page = output.page(at: index) else { return false }
-            if !(page.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            guard let outputPage = output.page(at: index),
+                  let sourcePage = sourceDocument.page(at: index) else { return false }
+            if !(outputPage.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return false
             }
-            if !page.annotations.isEmpty {
+            if !outputPage.annotations.isEmpty {
                 return false
             }
+            let redactionRects = matches
+                .filter { $0.pageIndex == index && $0.isSelected }
+                .flatMap(\.rects)
+            guard let expectedImage = renderPage(sourcePage, dpi: 72, redactionRects: redactionRects),
+                  let outputImage = renderPage(outputPage, dpi: 72, redactionRects: []),
+                  imagesAreVisuallyEquivalent(expectedImage, outputImage) else { return false }
         }
         return true
+    }
+
+    private static func imagesAreVisuallyEquivalent(_ first: CGImage, _ second: CGImage) -> Bool {
+        let comparisonWidth = min(max(first.width, second.width), 640)
+        let firstAspect = CGFloat(first.height) / CGFloat(max(first.width, 1))
+        let secondAspect = CGFloat(second.height) / CGFloat(max(second.width, 1))
+        guard abs(firstAspect - secondAspect) < 0.02 else { return false }
+        let comparisonHeight = max(Int((CGFloat(comparisonWidth) * firstAspect).rounded()), 1)
+        guard let firstPixels = grayscalePixels(first, width: comparisonWidth, height: comparisonHeight),
+              let secondPixels = grayscalePixels(second, width: comparisonWidth, height: comparisonHeight),
+              firstPixels.count == secondPixels.count,
+              !firstPixels.isEmpty else { return false }
+
+        var totalDifference = 0
+        var materiallyDifferentPixels = 0
+        for index in firstPixels.indices {
+            let difference = abs(Int(firstPixels[index]) - Int(secondPixels[index]))
+            totalDifference += difference
+            if difference > 48 { materiallyDifferentPixels += 1 }
+        }
+        let pixelCount = firstPixels.count
+        let meanDifference = Double(totalDifference) / Double(pixelCount * 255)
+        let materialDifferenceRatio = Double(materiallyDifferentPixels) / Double(pixelCount)
+        return meanDifference <= 0.035 && materialDifferenceRatio <= 0.045
+    }
+
+    private static func grayscalePixels(_ image: CGImage, width: Int, height: Int) -> [UInt8]? {
+        var pixels = [UInt8](repeating: 255, count: width * height)
+        let created = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let baseAddress = buffer.baseAddress,
+                  let context = CGContext(
+                    data: baseAddress,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: width,
+                    space: CGColorSpaceCreateDeviceGray(),
+                    bitmapInfo: CGImageAlphaInfo.none.rawValue
+                  ) else { return false }
+            context.setFillColor(gray: 1, alpha: 1)
+            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            context.interpolationQuality = .high
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        return created ? pixels : nil
     }
 
     private static func uniqueOutputURL(for input: URL, in folder: URL) -> URL {

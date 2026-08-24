@@ -60,7 +60,7 @@ Masker never overwrites an original. Output names end in `_masked.pdf`; if that 
 
 ## What "permanent" means
 
-Each exported page is rebuilt from sanitized pixels at 300 DPI. The original PDF objects are not copied into the output. Masker then reopens and validates the result before reporting success.
+Each exported page is rebuilt from sanitized pixels at 300 DPI using Core Graphics. The original PDF objects are not copied into the output. Masker then reopens the result, verifies that active content is gone, and visually compares every page with the expected masked source before reporting success.
 
 This intentionally makes the sanitized PDF non-searchable and non-editable. It also increases file size compared with object-level redaction.
 

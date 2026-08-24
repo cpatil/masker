@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.0 - 2026-08-24
+
+- Uses Core Graphics directly for page rasterization instead of PDFKit's fragile page-image path.
+- Preserves visible source annotations while still removing them from the sanitized PDF structure.
+- Compares every sanitized page with the expected masked source image and removes the output if visual validation fails.
+- Adds a regression test proving that a half-corrupted PDF is rejected.
+
 ## 1.2.2 - 2026-08-24
 
 - Adds an always-visible Recents button and an expandable per-PDF list.

@@ -212,7 +212,6 @@ struct MaskerSelfTest {
             files: [source],
             matches: matches + [pathologicalRect],
             outputFolder: outputs,
-            dpi: 180,
             progress: { _ in }
         )
         try require(created.count == 1, "Expected one output")
@@ -220,6 +219,18 @@ struct MaskerSelfTest {
         try require(output.pageCount == 4, "Expected four pages")
         try require((0..<output.pageCount).allSatisfy { (output.page(at: $0)?.string ?? "").isEmpty }, "Output still has a text layer")
         try require((0..<output.pageCount).allSatisfy { output.page(at: $0)?.annotations.isEmpty == true }, "Output still has annotations")
+
+        let corruptOutput = root.appendingPathComponent("deliberately-corrupted-output.pdf")
+        try makeVisuallyCorruptedPDF(at: corruptOutput, pageCount: 4)
+        guard let sourceDocument = PDFDocument(url: source) else { fatalError("Could not reopen source") }
+        try require(
+            !PDFMasker.validateSanitizedOutput(
+                corruptOutput,
+                sourceDocument: sourceDocument,
+                matches: matches + [pathologicalRect]
+            ),
+            "Visual validation accepted a half-corrupted PDF"
+        )
 
         let residual = PDFMasker.scan(
             files: created,
@@ -250,6 +261,14 @@ struct MaskerSelfTest {
         for amount in ["4,277", "431", "88", "129", "254"] {
             try require(preservedAmountValues.contains(amount), "Table amount was not preserved: \(amount)")
         }
+
+        let preservedAnnotation = PDFMasker.scan(
+            files: created,
+            exactTerms: ["VISIBLE ANNOTATION"],
+            options: PatternOptions(detectSSN: false, detectEIN: false, detectEmail: false, detectPhone: false),
+            progress: { _ in }
+        )
+        try require(!preservedAnnotation.isEmpty, "Visible source annotation was not preserved in the sanitized pixels")
 
         report("PASS source=\(source.path)")
         report("PASS output=\(created[0].path)")
@@ -296,10 +315,42 @@ struct MaskerSelfTest {
         pdf.endPDFPage()
         pdf.closePDF()
 
-        if let document = PDFDocument(url: url), let page = document.page(at: 2) {
-            page.rotation = 90
+        if let document = PDFDocument(url: url) {
+            if let page = document.page(at: 2) {
+                page.rotation = 90
+            }
+            if let page = document.page(at: 0) {
+                let annotation = PDFAnnotation(
+                    bounds: CGRect(x: 72, y: 410, width: 280, height: 44),
+                    forType: .freeText,
+                    withProperties: nil
+                )
+                annotation.contents = "VISIBLE ANNOTATION"
+                annotation.font = NSFont.boldSystemFont(ofSize: 20)
+                annotation.fontColor = .black
+                annotation.color = .clear
+                annotation.interiorColor = .white
+                page.addAnnotation(annotation)
+            }
             document.write(to: url)
         }
+    }
+
+    private static func makeVisuallyCorruptedPDF(at url: URL, pageCount: Int) throws {
+        guard let consumer = CGDataConsumer(url: url as CFURL) else { fatalError("No PDF consumer") }
+        var mediaBox = CGRect(x: 0, y: 0, width: 612, height: 792)
+        guard let pdf = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else { fatalError("No PDF context") }
+        for pageIndex in 0..<pageCount {
+            pdf.beginPDFPage(nil)
+            pdf.setFillColor(NSColor.white.cgColor)
+            pdf.fill(mediaBox)
+            if pageIndex == 0 {
+                pdf.setFillColor(NSColor.black.cgColor)
+                pdf.fill(CGRect(x: 0, y: 0, width: mediaBox.width, height: mediaBox.height * 0.55))
+            }
+            pdf.endPDFPage()
+        }
+        pdf.closePDF()
     }
 
     private static func makeBoundaryPDF(at url: URL) throws {
