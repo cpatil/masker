@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import PDFKit
 import SwiftUI
 import UniformTypeIdentifiers
@@ -20,7 +21,14 @@ struct MaskerApp: App {
 #endif
 
 final class MaskerModel: ObservableObject {
+    private static let recentPDFPathsKey = "recentPDFPaths"
+    private static let maskValuesByPDFPathKey = "maskValuesByPDFPath"
+    private static let maximumRecentPDFs = 10
+
+    private let userDefaults: UserDefaults
+
     @Published var files: [URL] = []
+    @Published private(set) var recentFiles: [URL] = []
     @Published var exactValues = ""
     @Published var detectSSN = true
     @Published var detectEIN = true
@@ -49,10 +57,29 @@ final class MaskerModel: ObservableObject {
 
     var selectedCount: Int { matches.filter(\.isSelected).count }
 
+    init(userDefaults: UserDefaults = .standard) {
+        self.userDefaults = userDefaults
+        let storedPaths = userDefaults.stringArray(forKey: Self.recentPDFPathsKey) ?? []
+        recentFiles = storedPaths
+            .map { URL(fileURLWithPath: $0).standardizedFileURL }
+            .filter {
+                $0.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame &&
+                    FileManager.default.fileExists(atPath: $0.path)
+            }
+        persistRecentFiles()
+    }
+
     func addFiles(_ urls: [URL]) {
-        let pdfs = urls.filter { $0.pathExtension.lowercased() == "pdf" }
+        let pdfs = urls
+            .map(\.standardizedFileURL)
+            .filter { $0.pathExtension.lowercased() == "pdf" }
+        let wasEmpty = files.isEmpty
         for url in pdfs where !files.contains(where: { $0.standardizedFileURL == url.standardizedFileURL }) {
             files.append(url)
+        }
+        rememberRecentFiles(pdfs)
+        if wasEmpty, pdfs.count == 1, let restored = storedMaskValues(for: pdfs[0]) {
+            exactValues = restored
         }
         if outputFolder == nil, let first = files.first {
             outputFolder = first.deletingLastPathComponent().appendingPathComponent("Masked PDFs", isDirectory: true)
@@ -61,6 +88,61 @@ final class MaskerModel: ObservableObject {
         matches = []
         selectedMatchID = nil
         status = files.isEmpty ? "No PDF files selected." : "Ready to scan \(files.count) PDF\(files.count == 1 ? "" : "s")."
+    }
+
+    func openRecentFile(_ url: URL) {
+        let standardized = url.standardizedFileURL
+        guard FileManager.default.fileExists(atPath: standardized.path) else {
+            forgetRecentFile(standardized)
+            showError("That recent PDF has been moved or deleted.")
+            return
+        }
+
+        stashMaskValuesForLoadedFiles()
+        files = [standardized]
+        matches = []
+        selectedMatchID = nil
+        activeFileURL = standardized
+        currentPreviewPage = 0
+        outputFolder = standardized.deletingLastPathComponent().appendingPathComponent("Masked PDFs", isDirectory: true)
+        exactValues = storedMaskValues(for: standardized) ?? ""
+        rememberRecentFiles([standardized])
+        status = "Restored recent PDF and its saved mask values. Ready to scan."
+    }
+
+    func stashMaskValuesForLoadedFiles() {
+        guard !files.isEmpty else { return }
+        var stored = userDefaults.dictionary(forKey: Self.maskValuesByPDFPathKey) as? [String: String] ?? [:]
+        for file in files {
+            if exactValues.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                stored.removeValue(forKey: file.standardizedFileURL.path)
+            } else {
+                stored[file.standardizedFileURL.path] = exactValues
+            }
+        }
+        userDefaults.set(stored, forKey: Self.maskValuesByPDFPathKey)
+    }
+
+    func stashedValueCount(for file: URL) -> Int {
+        guard let values = storedMaskValues(for: file) else { return 0 }
+        return values.split(whereSeparator: \.isNewline).filter {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }.count
+    }
+
+    func forgetRecentFile(_ url: URL) {
+        let path = url.standardizedFileURL.path
+        recentFiles.removeAll { $0.standardizedFileURL.path == path }
+        persistRecentFiles()
+        var stored = userDefaults.dictionary(forKey: Self.maskValuesByPDFPathKey) as? [String: String] ?? [:]
+        stored.removeValue(forKey: path)
+        userDefaults.set(stored, forKey: Self.maskValuesByPDFPathKey)
+    }
+
+    func clearRecentFiles() {
+        recentFiles = []
+        userDefaults.removeObject(forKey: Self.recentPDFPathsKey)
+        userDefaults.removeObject(forKey: Self.maskValuesByPDFPathKey)
     }
 
     func removeFile(_ url: URL) {
@@ -95,6 +177,7 @@ final class MaskerModel: ObservableObject {
                 .filter { !$0.isEmpty }
         )
         let inputFiles = files
+        stashMaskValuesForLoadedFiles()
         let previouslyActiveFile = activeFileURL
         let previousPage = currentPreviewPage
 
@@ -208,6 +291,25 @@ final class MaskerModel: ObservableObject {
         showingError = true
         status = message
     }
+
+    private func rememberRecentFiles(_ urls: [URL]) {
+        for url in urls.reversed() {
+            let standardized = url.standardizedFileURL
+            recentFiles.removeAll { $0.standardizedFileURL.path == standardized.path }
+            recentFiles.insert(standardized, at: 0)
+        }
+        recentFiles = Array(recentFiles.prefix(Self.maximumRecentPDFs))
+        persistRecentFiles()
+    }
+
+    private func persistRecentFiles() {
+        userDefaults.set(recentFiles.map { $0.standardizedFileURL.path }, forKey: Self.recentPDFPathsKey)
+    }
+
+    private func storedMaskValues(for file: URL) -> String? {
+        let stored = userDefaults.dictionary(forKey: Self.maskValuesByPDFPathKey) as? [String: String]
+        return stored?[file.standardizedFileURL.path]
+    }
 }
 
 struct ContentView: View {
@@ -246,6 +348,9 @@ struct ContentView: View {
         }
         .onOpenURL { url in
             model.addFiles([url])
+        }
+        .onReceive(model.$exactValues.dropFirst()) { _ in
+            model.stashMaskValuesForLoadedFiles()
         }
     }
 
@@ -324,6 +429,59 @@ struct ContentView: View {
                                 .buttonStyle(.plain)
                             }
                             .font(.callout)
+                        }
+
+                        if !model.recentFiles.isEmpty {
+                            Divider()
+                            HStack {
+                                Text("Recent PDFs")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                Button("Clear") { model.clearRecentFiles() }
+                                    .buttonStyle(.plain)
+                                    .font(.caption)
+                            }
+
+                            ForEach(model.recentFiles.prefix(6), id: \.path) { file in
+                                HStack(spacing: 7) {
+                                    Button {
+                                        model.openRecentFile(file)
+                                    } label: {
+                                        HStack(spacing: 7) {
+                                            Image(systemName: "clock.arrow.circlepath")
+                                                .foregroundStyle(.secondary)
+                                            VStack(alignment: .leading, spacing: 1) {
+                                                Text(file.lastPathComponent)
+                                                    .lineLimit(1)
+                                                    .truncationMode(.middle)
+                                                let count = model.stashedValueCount(for: file)
+                                                Text("\(count) saved mask value\(count == 1 ? "" : "s")")
+                                                    .font(.caption2)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                            Spacer()
+                                        }
+                                        .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help(file.path)
+
+                                    Button {
+                                        model.forgetRecentFile(file)
+                                    } label: {
+                                        Image(systemName: "xmark")
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Forget this recent PDF and its saved mask values")
+                                }
+                                .font(.callout)
+                            }
+
+                            Text("Recent paths and exact values are stored only on this Mac.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
                         }
                     }
                     .padding(.top, 6)

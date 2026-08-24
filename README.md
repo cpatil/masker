@@ -21,6 +21,7 @@ Read the short development story: [I vibe-coded a PDF redactor because I needed 
 - Opt-in institution account-suffix detection that keeps names such as `MERRILL LYNCH` and right-aligned table amounts visible.
 - Line-scoped exceptions for false positives such as `FORM 8879`.
 - Search-as-you-type with previous/next navigation and cached on-device OCR; selected masks are omitted from results.
+- A local Recent PDFs list that restores each PDF's saved exact mask values.
 - Continuous-scroll review with matches synchronized to the visible page.
 - Permanent export that removes the original text layer, forms, annotations, attachments, scripts, layers, and metadata.
 
@@ -67,6 +68,7 @@ This intentionally makes the sanitized PDF non-searchable and non-editable. It a
 
 - Processing is local. Image-only pages use Apple's on-device Vision OCR.
 - Nothing in the app uploads documents, extracted text, or search terms.
+- Recent file paths and their exact mask values are stored in local macOS preferences and can be cleared from the app.
 - OCR and pattern matching can miss handwriting, unusual typography, separated digits, or poor scans.
 - Automatic detectors can produce false positives. Review every selected match and every output page before sharing.
 - Masker is a privacy tool, not a guarantee of regulatory compliance.

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0 - 2026-08-24
+
+- Adds a persistent Recent PDFs list with quick reopening.
+- Saves and restores the exact mask-value list separately for each recent PDF.
+- Automatically removes missing files and provides controls to forget one entry or clear all local history.
+
 ## 1.1.2 - 2026-08-24
 
 - Detects institution account suffixes before dotted leaders and right-aligned amounts.

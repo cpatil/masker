@@ -26,11 +26,26 @@ struct MaskerUISnapshot {
             progress: { _ in }
         )
 
-        let model = MaskerModel()
-        model.files = [input]
-        model.activeFileURL = input
+        let defaultsSuite = "local.masker.snapshot.\(UUID().uuidString)"
+        guard let testDefaults = UserDefaults(suiteName: defaultsSuite) else {
+            fatalError("Could not create isolated recent-file preferences")
+        }
+        testDefaults.removePersistentDomain(forName: defaultsSuite)
+        defer { testDefaults.removePersistentDomain(forName: defaultsSuite) }
+
+        let seedModel = MaskerModel(userDefaults: testDefaults)
+        seedModel.addFiles([input])
+        seedModel.exactValues = "JOE AND MARY FARMER\n444-55-6666"
+        seedModel.stashMaskValuesForLoadedFiles()
+
+        let model = MaskerModel(userDefaults: testDefaults)
+        precondition(model.recentFiles == [input.standardizedFileURL], "Recent PDF was not restored")
+        model.openRecentFile(input)
+        precondition(
+            model.exactValues == "JOE AND MARY FARMER\n444-55-6666",
+            "Saved mask values were not restored with the recent PDF"
+        )
         model.outputFolder = URL(fileURLWithPath: "/Users/example/Documents/Masked PDFs", isDirectory: true)
-        model.exactValues = "JOE AND MARY FARMER\n444-55-6666"
         model.detectEmail = true
         model.detectPhone = true
         model.generateNameVariants = true
@@ -66,6 +81,7 @@ struct MaskerUISnapshot {
         RunLoop.current.run(until: Date().addingTimeInterval(4.0))
         hosting.layoutSubtreeIfNeeded()
         precondition(model.pdfSearchResultCount == 1, "Search should list only the unchecked Farmer result")
+        precondition(model.stashedValueCount(for: input) == 2, "Recent PDF did not retain two mask values")
 
         var embeddedPDFView: PDFView?
         if let pdfView = findPDFView(in: hosting), let document = pdfView.document {
@@ -98,6 +114,11 @@ struct MaskerUISnapshot {
             RunLoop.current.run(until: Date().addingTimeInterval(0.5))
             precondition(model.currentPreviewPage == 1, "Match list did not follow PDF page navigation")
         }
+
+        model.clearRecentFiles()
+        let clearedModel = MaskerModel(userDefaults: testDefaults)
+        precondition(clearedModel.recentFiles.isEmpty, "Clear did not remove recent PDFs")
+        precondition(clearedModel.stashedValueCount(for: input) == 0, "Clear did not remove saved mask values")
         FileHandle.standardError.write(Data("PASS uiSnapshot=\(output.path) matches=\(matches.count)\n".utf8))
     }
 
