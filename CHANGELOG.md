@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.3 - 2026-08-24
+
+- Shows the complete PDF filename in a standard macOS tooltip when hovering over a truncated loaded, recent, or active filename.
+
 ## 1.3.2 - 2026-08-24
 
 - Prevents false visual-validation failures on dense, small-text tax pages by comparing coarse page structure instead of font-edge pixels.

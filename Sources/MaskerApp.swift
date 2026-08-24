@@ -571,6 +571,7 @@ struct ContentView: View {
                                 Text(file.lastPathComponent)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
+                                    .help(file.lastPathComponent)
                                 Spacer()
                                 Button {
                                     model.removeFile(file)
@@ -614,6 +615,7 @@ struct ContentView: View {
                                                 Text(file.lastPathComponent)
                                                     .lineLimit(1)
                                                     .truncationMode(.middle)
+                                                    .help(file.lastPathComponent)
                                                 let count = model.stashedValueCount(for: file)
                                                 Text("\(count) saved mask value\(count == 1 ? "" : "s")")
                                                     .font(.caption2)
@@ -624,7 +626,6 @@ struct ContentView: View {
                                         .contentShape(Rectangle())
                                     }
                                     .buttonStyle(.plain)
-                                    .help(file.path)
 
                                     Button("Import Values") {
                                         model.importStashedMaskValues(for: file)
@@ -758,6 +759,7 @@ struct ContentView: View {
                             .lineLimit(1)
                     }
                     .frame(maxWidth: 280)
+                    .help(activeFile.lastPathComponent)
                 }
             }
             .padding(14)
