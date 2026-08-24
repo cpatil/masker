@@ -1,0 +1,4 @@
+Masker.app/
+.build/
+tmp/
+.DS_Store
