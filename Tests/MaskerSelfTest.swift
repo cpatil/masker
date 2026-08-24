@@ -85,6 +85,30 @@ struct MaskerSelfTest {
             accountSuffixes.filter { $0 == "2759" }.count == 2,
             "CHARLES SCHWAB 2759 STC should be detected in addition to VANGUARD #2759"
         )
+        let replacementLabels = PDFMasker.replacementLabels(for: matches)
+        let fullFarmerMatch = matches.first {
+            $0.matchedText.caseInsensitiveCompare(fullFarmerName) == .orderedSame
+        }
+        try require(
+            fullFarmerMatch.flatMap { replacementLabels[$0.id] } ==
+                joeFarmerMatches.first.flatMap { replacementLabels[$0.id] },
+            "The full name and its generated variant did not reuse the same replacement label"
+        )
+        let merrill2396 = matches.first { $0.category.hasPrefix("Account suffix") && $0.matchedText == "2396" }
+        let merrill9550 = matches.first { $0.category.hasPrefix("Account suffix") && $0.matchedText == "9550" }
+        try require(
+            merrill2396.flatMap { replacementLabels[$0.id] } !=
+                merrill9550.flatMap { replacementLabels[$0.id] },
+            "Two Merrill Lynch account suffixes received the same replacement label"
+        )
+        let repeated2396Labels = Set(matches
+            .filter { $0.category.hasPrefix("Account suffix") && $0.matchedText == "2396" }
+            .compactMap { replacementLabels[$0.id] })
+        try require(repeated2396Labels.count == 1, "Repeated same-institution account identifiers did not reuse one label")
+        let crossInstitution2759Labels = Set(matches
+            .filter { $0.category.hasPrefix("Account suffix") && $0.matchedText == "2759" }
+            .compactMap { replacementLabels[$0.id] })
+        try require(crossInstitution2759Labels.count == 2, "Different institutions sharing a suffix reused one label")
         try require(
             !accountSuffixes.contains("1040") && !accountSuffixes.contains("2025") &&
                 !accountSuffixes.contains("8879") && !accountSuffixes.contains("777"),
@@ -220,6 +244,38 @@ struct MaskerSelfTest {
         try require((0..<output.pageCount).allSatisfy { (output.page(at: $0)?.string ?? "").isEmpty }, "Output still has a text layer")
         try require((0..<output.pageCount).allSatisfy { output.page(at: $0)?.annotations.isEmpty == true }, "Output still has annotations")
 
+        let labeledOutputs = root.appendingPathComponent("labeled-outputs", isDirectory: true)
+        let labeled = try PDFMasker.exportSanitizedCopies(
+            files: [source],
+            matches: matches,
+            outputFolder: labeledOutputs,
+            replaceWithLabels: true,
+            progress: { _ in }
+        )
+        try require(labeled.count == 1, "Expected one labeled output")
+        guard let labeledOutput = PDFDocument(url: labeled[0]) else { fatalError("Could not reopen labeled output") }
+        try require(labeledOutput.pageCount == 5, "Labeled output changed the page count")
+        try require(
+            (0..<labeledOutput.pageCount).allSatisfy { (labeledOutput.page(at: $0)?.string ?? "").isEmpty },
+            "Labeled output unexpectedly contains a searchable text layer"
+        )
+        try require(
+            (0..<labeledOutput.pageCount).allSatisfy { labeledOutput.page(at: $0)?.annotations.isEmpty == true },
+            "Labeled output still has live annotations"
+        )
+        for (pageIndex, filename) in [(0, "labeled-name-preview.png"), (3, "labeled-account-preview.png")] {
+            if let labeledPreview = PDFMasker.previewImage(
+                fileURL: source,
+                pageIndex: pageIndex,
+                matches: matches,
+                replaceWithLabels: true,
+                dpi: 180
+            ), let cgImage = labeledPreview.cgImage(forProposedRect: nil, context: nil, hints: nil),
+               let data = NSBitmapImageRep(cgImage: cgImage).representation(using: .png, properties: [:]) {
+                try data.write(to: root.appendingPathComponent(filename))
+            }
+        }
+
         let corruptOutput = root.appendingPathComponent("deliberately-corrupted-output.pdf")
         try makeVisuallyCorruptedPDF(at: corruptOutput, pageCount: 5)
         guard let sourceDocument = PDFDocument(url: source) else { fatalError("Could not reopen source") }
@@ -310,7 +366,7 @@ struct MaskerSelfTest {
         pdf.beginPDFPage(nil)
         pdf.setFillColor(NSColor.white.cgColor)
         pdf.fill(mediaBox)
-        drawText("ALLY BANK 3436\nCHARLES SCHWAB & CO., INC -8891\nCHARLES SCHWAB 5077\nMERRILL LYNCH - 2396\nMERRILL LYNCH 21807\nVANGUARD #2759\nWEALTHFRONT - 4985\nCHARLES SCHWAB 2759 STC\nALLY BANK 0684.......... $ 4,277.\nMERRILL LYNCH - 9550.......... 431.\nNORTHSTAR 0421.......... 88.\nTOTAL 777.......... 88.\nHDFC BANK IN INDIA.......... 129.\nIDBI.......... 254.\nBLACKSTONE PRIVATE CREDIT FUND\nVANGUARD #2025\nFORM 1040\nINTERNAL REVENUE SERVICE FORM 8879\nTAX YEAR 2025", in: pdf, at: CGPoint(x: 72, y: 740), fontSize: 16, frameHeight: 500)
+        drawText("ALLY BANK 3436\nCHARLES SCHWAB & CO., INC -8891\nCHARLES SCHWAB 5077\nMERRILL LYNCH - 2396\nMERRILL LYNCH 21807\nVANGUARD #2759\nWEALTHFRONT - 4985\nCHARLES SCHWAB 2759 STC\nALLY BANK 0684.......... $ 4,277.\nMERRILL LYNCH - 9550.......... 431.\nMERRILL LYNCH 2396.......... 32.\nNORTHSTAR 0421.......... 88.\nTOTAL 777.......... 88.\nHDFC BANK IN INDIA.......... 129.\nIDBI.......... 254.\nBLACKSTONE PRIVATE CREDIT FUND\nVANGUARD #2025\nFORM 1040\nINTERNAL REVENUE SERVICE FORM 8879\nTAX YEAR 2025", in: pdf, at: CGPoint(x: 72, y: 740), fontSize: 16, frameHeight: 500)
         pdf.endPDFPage()
 
         pdf.beginPDFPage(nil)

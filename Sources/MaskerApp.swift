@@ -64,6 +64,7 @@ final class MaskerModel: ObservableObject {
     @Published var generateNameVariants = false
     @Published var detectAccountSuffixes = false
     @Published var accountSuffixExceptions = ""
+    @Published var replaceWithLabels = false
     @Published var matches: [RedactionMatch] = []
     @Published var selectedMatchID: UUID?
     @Published var activeFileURL: URL?
@@ -363,6 +364,7 @@ final class MaskerModel: ObservableObject {
 
         let inputFiles = files
         let reviewedMatches = matches
+        let shouldReplaceWithLabels = replaceWithLabels
         isBusy = true
         status = "Preparing sanitized copies..."
 
@@ -371,7 +373,8 @@ final class MaskerModel: ObservableObject {
                 let outputs = try PDFMasker.exportSanitizedCopies(
                     files: inputFiles,
                     matches: reviewedMatches,
-                    outputFolder: folder
+                    outputFolder: folder,
+                    replaceWithLabels: shouldReplaceWithLabels
                 ) { message in
                     DispatchQueue.main.async { self.status = message }
                 }
@@ -391,6 +394,13 @@ final class MaskerModel: ObservableObject {
 
     func selectAll(_ selected: Bool) {
         for index in matches.indices { matches[index].isSelected = selected }
+    }
+
+    func replacementLabel(for match: RedactionMatch) -> String? {
+        let fileMatches = matches.filter {
+            $0.fileURL.standardizedFileURL == match.fileURL.standardizedFileURL
+        }
+        return PDFMasker.replacementLabels(for: fileMatches)[match.id]
     }
 
     func selectCurrentPage(_ selected: Bool) {
@@ -705,6 +715,11 @@ struct ContentView: View {
                             Text("Opt-in: a value such as “JOE AND MARY FARMER” also searches for “JOE FARMER.” Review these matches carefully.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                            Divider()
+                            Toggle("Replace black boxes with labels", isOn: $model.replaceWithLabels)
+                            Text("Exports readable placeholders such as <Acct 1> and <Name 1>. Repeated values reuse a label; different account identifiers get different numbers.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         .padding(.top, 6)
                         .padding(.trailing, 5)
@@ -815,6 +830,12 @@ struct ContentView: View {
                                             .font(.system(.callout, design: .monospaced))
                                             .lineLimit(1)
                                             .redacted(reason: model.revealDetectedValues ? [] : .privacy)
+                                        if model.replaceWithLabels,
+                                           let label = model.replacementLabel(for: model.matches[index]) {
+                                            Text("Exports as \(label)")
+                                                .font(.caption.monospaced())
+                                                .foregroundStyle(.secondary)
+                                        }
                                     }
                                     Spacer()
                                 }
@@ -885,6 +906,7 @@ struct ContentView: View {
                     ContinuousPDFView(
                         fileURL: activeFile,
                         matches: model.matches.filter { $0.fileURL.standardizedFileURL == activeFile.standardizedFileURL },
+                        replaceWithLabels: model.replaceWithLabels,
                         currentPage: $model.currentPreviewPage,
                         searchText: model.pdfSearchText,
                         searchResultCount: $model.pdfSearchResultCount,
@@ -1003,6 +1025,7 @@ struct ContentView: View {
 struct ContinuousPDFView: NSViewRepresentable {
     let fileURL: URL
     let matches: [RedactionMatch]
+    let replaceWithLabels: Bool
     @Binding var currentPage: Int
     let searchText: String
     @Binding var searchResultCount: Int
@@ -1033,6 +1056,7 @@ struct ContinuousPDFView: NSViewRepresentable {
         context.coordinator.updateDocumentIfNeeded(
             fileURL: fileURL,
             matches: matches,
+            replaceWithLabels: replaceWithLabels,
             requestedPage: currentPage
         )
         context.coordinator.updateSearchIfNeeded(searchText)
@@ -1097,13 +1121,18 @@ struct ContinuousPDFView: NSViewRepresentable {
             pageObserver = nil
         }
 
-        func updateDocumentIfNeeded(fileURL: URL, matches: [RedactionMatch], requestedPage: Int) {
+        func updateDocumentIfNeeded(
+            fileURL: URL,
+            matches: [RedactionMatch],
+            replaceWithLabels: Bool,
+            requestedPage: Int
+        ) {
             guard let pdfView else { return }
             let filePath = fileURL.standardizedFileURL.path
             let matchPart = matches
                 .map { "\($0.id.uuidString):\($0.isSelected ? 1 : 0)" }
                 .joined(separator: "|")
-            let signature = filePath + "|" + matchPart
+            let signature = filePath + "|labels=\(replaceWithLabels ? 1 : 0)|" + matchPart
 
             if signature != documentSignature {
                 searchWorkItem?.cancel()
@@ -1112,7 +1141,12 @@ struct ContinuousPDFView: NSViewRepresentable {
                 let visiblePage = pdfView.currentPage.flatMap { pdfView.document?.index(for: $0) }
                 let targetPage = loadedFilePath == filePath ? (visiblePage ?? requestedPage) : requestedPage
                 guard let data = try? Data(contentsOf: fileURL), let document = PDFDocument(data: data) else { return }
-                addRedactionAnnotations(matches.filter(\.isSelected), to: document)
+                addRedactionAnnotations(
+                    matches.filter(\.isSelected),
+                    allMatches: matches,
+                    replaceWithLabels: replaceWithLabels,
+                    to: document
+                )
                 documentSignature = signature
                 loadedFilePath = filePath
                 pdfView.document = document
@@ -1267,14 +1301,43 @@ struct ContinuousPDFView: NSViewRepresentable {
             if let page = document.page(at: clamped) { pdfView.go(to: page) }
         }
 
-        private func addRedactionAnnotations(_ matches: [RedactionMatch], to document: PDFDocument) {
+        private func addRedactionAnnotations(
+            _ matches: [RedactionMatch],
+            allMatches: [RedactionMatch],
+            replaceWithLabels: Bool,
+            to document: PDFDocument
+        ) {
+            let labelsByMatchID = replaceWithLabels ? PDFMasker.replacementLabels(for: allMatches) : [:]
             for match in matches {
                 guard let page = document.page(at: match.pageIndex) else { continue }
-                for displayRect in PDFMasker.safeRedactionRects(match.rects, on: page) {
+                let safeRects = PDFMasker.safeRedactionRects(match.rects, on: page)
+                for displayRect in safeRects {
                     let pageRect = pageRect(for: displayRect, on: page).insetBy(dx: -0.5, dy: -0.5)
                     let annotation = PDFAnnotation(bounds: pageRect, forType: .square, withProperties: nil)
-                    annotation.color = .black
-                    annotation.interiorColor = .black
+                    annotation.color = replaceWithLabels ? .white : .black
+                    annotation.interiorColor = replaceWithLabels ? .white : .black
+                    annotation.shouldDisplay = true
+                    annotation.shouldPrint = true
+                    let border = PDFBorder()
+                    border.lineWidth = 0
+                    annotation.border = border
+                    page.addAnnotation(annotation)
+                }
+                if replaceWithLabels,
+                   let label = labelsByMatchID[match.id],
+                   let displayRect = safeRects.first {
+                    let pageRect = pageRect(for: displayRect, on: page).insetBy(dx: -0.5, dy: -0.5)
+                    let annotation = PDFAnnotation(
+                        bounds: pageRect,
+                        forType: .freeText,
+                        withProperties: nil
+                    )
+                    annotation.contents = label
+                    annotation.font = replacementFont(for: label, in: pageRect)
+                    annotation.fontColor = .black
+                    annotation.color = .clear
+                    annotation.interiorColor = .clear
+                    annotation.alignment = .center
                     annotation.shouldDisplay = true
                     annotation.shouldPrint = true
                     let border = PDFBorder()
@@ -1283,6 +1346,17 @@ struct ContinuousPDFView: NSViewRepresentable {
                     page.addAnnotation(annotation)
                 }
             }
+        }
+
+        private func replacementFont(for label: String, in rect: CGRect) -> NSFont {
+            var size = min(max(rect.height * 0.62, 5), 13)
+            var font = NSFont.systemFont(ofSize: size)
+            let measured = (label as NSString).size(withAttributes: [.font: font]).width
+            if measured > rect.width - 2 {
+                size = max(4.5, size * max(rect.width - 2, 1) / max(measured, 1))
+                font = NSFont.systemFont(ofSize: size)
+            }
+            return font
         }
 
         private func installSearchAnnotations() {

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.0 - 2026-08-24
+
+- Adds an opt-in export mode that replaces black masks with generic labels such as `<Acct 1>` and `<Name 1>`.
+- Reuses labels for repeated values and name variants while assigning distinct labels to different account identifiers, including multiple accounts at one institution.
+- Previews each replacement label during review and permanently removes the source pixels before drawing the label.
+
 ## 1.3.3 - 2026-08-24
 
 - Shows the complete PDF filename in a standard macOS tooltip when hovering over a truncated loaded, recent, or active filename.
