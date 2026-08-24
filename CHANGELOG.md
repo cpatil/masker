@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.1 - 2026-08-24
+
+- Adds Import Values beside each recent PDF for restoring a Masker JSON export.
+- Validates the JSON format and version, removes duplicate values, and warns before importing values exported for a differently named PDF.
+
 ## 1.3.0 - 2026-08-24
 
 - Uses Core Graphics directly for page rasterization instead of PDFKit's fragile page-image path.

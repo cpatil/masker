@@ -21,11 +21,31 @@ struct MaskerApp: App {
 #endif
 
 final class MaskerModel: ObservableObject {
-    private struct MaskValuesExport: Encodable {
-        let format = "masker-mask-values"
-        let version = 1
+    private struct MaskValuesExport: Codable {
+        let format: String
+        let version: Int
         let pdfFileName: String
         let maskValues: [String]
+    }
+
+    private enum MaskValuesImportError: LocalizedError {
+        case invalidFormat
+        case unsupportedVersion(Int)
+        case noValues
+        case filenameMismatch(exported: String, selected: String)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidFormat:
+                return "This is not a Masker mask-values file."
+            case .unsupportedVersion(let version):
+                return "This mask-values file uses unsupported version \(version)."
+            case .noValues:
+                return "This file does not contain any mask values."
+            case .filenameMismatch(let exported, let selected):
+                return "These values were exported for \(exported), not \(selected)."
+            }
+        }
     }
 
     private static let recentPDFPathsKey = "recentPDFPaths"
@@ -142,7 +162,12 @@ final class MaskerModel: ObservableObject {
             .split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        let payload = MaskValuesExport(pdfFileName: file.lastPathComponent, maskValues: values)
+        let payload = MaskValuesExport(
+            format: "masker-mask-values",
+            version: 1,
+            pdfFileName: file.lastPathComponent,
+            maskValues: values
+        )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         return try encoder.encode(payload)
@@ -170,6 +195,81 @@ final class MaskerModel: ObservableObject {
             status = "Exported saved mask values to \(destination.lastPathComponent)."
         } catch {
             showError("Could not export the saved mask values: \(error.localizedDescription)")
+        }
+    }
+
+    @discardableResult
+    func importStashedMaskValuesJSON(
+        _ data: Data,
+        for file: URL,
+        allowMismatchedFilename: Bool = false
+    ) throws -> Int {
+        let payload = try JSONDecoder().decode(MaskValuesExport.self, from: data)
+        guard payload.format == "masker-mask-values" else {
+            throw MaskValuesImportError.invalidFormat
+        }
+        guard payload.version == 1 else {
+            throw MaskValuesImportError.unsupportedVersion(payload.version)
+        }
+        guard allowMismatchedFilename ||
+                payload.pdfFileName.caseInsensitiveCompare(file.lastPathComponent) == .orderedSame else {
+            throw MaskValuesImportError.filenameMismatch(
+                exported: payload.pdfFileName,
+                selected: file.lastPathComponent
+            )
+        }
+
+        var seen = Set<String>()
+        let values = payload.maskValues.compactMap { raw -> String? in
+            let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            guard !value.isEmpty, seen.insert(key).inserted else { return nil }
+            return value
+        }
+        guard !values.isEmpty else { throw MaskValuesImportError.noValues }
+
+        let joined = values.joined(separator: "\n")
+        var stored = userDefaults.dictionary(forKey: Self.maskValuesByPDFPathKey) as? [String: String] ?? [:]
+        stored[file.standardizedFileURL.path] = joined
+        userDefaults.set(stored, forKey: Self.maskValuesByPDFPathKey)
+
+        if files.count == 1, files[0].standardizedFileURL == file.standardizedFileURL {
+            exactValues = joined
+            matches = []
+            selectedMatchID = nil
+            status = "Imported \(values.count) mask value\(values.count == 1 ? "" : "s"). Ready to scan."
+        } else {
+            status = "Imported \(values.count) saved mask value\(values.count == 1 ? "" : "s") for \(file.lastPathComponent)."
+            objectWillChange.send()
+        }
+        return values.count
+    }
+
+    func importStashedMaskValues(for file: URL) {
+        let panel = NSOpenPanel()
+        panel.title = "Import Mask Values"
+        panel.prompt = "Import"
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let source = panel.url else { return }
+
+        do {
+            let data = try Data(contentsOf: source, options: .mappedIfSafe)
+            do {
+                try importStashedMaskValuesJSON(data, for: file)
+            } catch MaskValuesImportError.filenameMismatch(let exported, let selected) {
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "Use values from a different PDF?"
+                alert.informativeText = "This file was exported for \(exported), not \(selected)."
+                alert.addButton(withTitle: "Import Anyway")
+                alert.addButton(withTitle: "Cancel")
+                guard alert.runModal() == .alertFirstButtonReturn else { return }
+                try importStashedMaskValuesJSON(data, for: file, allowMismatchedFilename: true)
+            }
+        } catch {
+            showError("Could not import the saved mask values: \(error.localizedDescription)")
         }
     }
 
@@ -525,6 +625,13 @@ struct ContentView: View {
                                     }
                                     .buttonStyle(.plain)
                                     .help(file.path)
+
+                                    Button("Import Values") {
+                                        model.importStashedMaskValues(for: file)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .font(.caption)
+                                    .help("Restore mask values from a Masker JSON file")
 
                                     Button("Export Values") {
                                         model.exportStashedMaskValues(for: file)

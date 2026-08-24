@@ -82,13 +82,29 @@ struct MaskerUISnapshot {
         hosting.layoutSubtreeIfNeeded()
         precondition(model.pdfSearchResultCount == 1, "Search should list only the unchecked Farmer result")
         precondition(model.stashedValueCount(for: input) == 2, "Recent PDF did not retain two mask values")
-        let exportedValues = try JSONSerialization.jsonObject(
-            with: model.stashedMaskValuesJSON(for: input)
-        ) as? [String: Any]
+        let exportedData = try model.stashedMaskValuesJSON(for: input)
+        let exportedValues = try JSONSerialization.jsonObject(with: exportedData) as? [String: Any]
         precondition(exportedValues?["format"] as? String == "masker-mask-values", "Mask-value export format is missing")
         precondition(exportedValues?["pdfFileName"] as? String == input.lastPathComponent, "Mask-value export has the wrong PDF name")
         precondition((exportedValues?["maskValues"] as? [String])?.count == 2, "Mask-value export did not include two values")
         precondition(exportedValues?["pdfPath"] == nil, "Mask-value export must not disclose the local PDF path")
+        model.exactValues = ""
+        model.stashMaskValuesForLoadedFiles()
+        precondition(model.stashedValueCount(for: input) == 0, "Could not clear values before import test")
+        let importedCount = try model.importStashedMaskValuesJSON(exportedData, for: input)
+        precondition(importedCount == 2, "Mask-value import did not restore two values")
+        precondition(
+            model.exactValues == "JOE AND MARY FARMER\n444-55-6666",
+            "Mask-value import did not restore the exact-value editor"
+        )
+
+        var mismatchedObject = exportedValues ?? [:]
+        mismatchedObject["pdfFileName"] = "different-document.pdf"
+        let mismatchedData = try JSONSerialization.data(withJSONObject: mismatchedObject)
+        do {
+            try model.importStashedMaskValuesJSON(mismatchedData, for: input)
+            preconditionFailure("Mask-value import accepted a mismatched filename without confirmation")
+        } catch { }
 
         var embeddedPDFView: PDFView?
         if let pdfView = findPDFView(in: hosting), let document = pdfView.document {
