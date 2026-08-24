@@ -846,8 +846,9 @@ struct ContinuousPDFView: NSViewRepresentable {
                   generation == searchGeneration,
                   !cancellation.isCancelled else { return }
             let fileURL = parent.fileURL
+            let selectedMatches = parent.matches.filter(\.isSelected)
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let found = PDFMasker.scan(
+                let scanned = PDFMasker.scan(
                     files: [fileURL],
                     exactTerms: [query],
                     options: PatternOptions(
@@ -872,6 +873,10 @@ struct ContinuousPDFView: NSViewRepresentable {
                             self.parent.searchProgress = label
                         }
                     }
+                )
+                let found = PDFMasker.searchResults(
+                    scanned,
+                    excludingSelectedMatches: selectedMatches
                 )
                 DispatchQueue.main.async {
                     guard let self,

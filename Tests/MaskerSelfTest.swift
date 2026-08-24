@@ -90,6 +90,45 @@ struct MaskerSelfTest {
             "Form number or tax year was mistaken for an account suffix"
         )
 
+        let partialMaskedNameSearch = PDFMasker.scan(
+            files: [source],
+            exactTerms: ["Example P"],
+            options: PatternOptions(detectSSN: false, detectEIN: false, detectEmail: false, detectPhone: false),
+            progress: { _ in }
+        )
+        try require(
+            partialMaskedNameSearch.count == 1,
+            "Expected one partial-name search result; found \(partialMaskedNameSearch.count)"
+        )
+        try require(
+            PDFMasker.searchResults(partialMaskedNameSearch, excludingSelectedMatches: matches).isEmpty,
+            "Search listed text already covered by a selected mask"
+        )
+        var matchesWithExampleUnselected = matches
+        if let index = matchesWithExampleUnselected.firstIndex(where: {
+            $0.matchedText.caseInsensitiveCompare("Example Person") == .orderedSame
+        }) {
+            matchesWithExampleUnselected[index].isSelected = false
+        }
+        try require(
+            PDFMasker.searchResults(
+                partialMaskedNameSearch,
+                excludingSelectedMatches: matchesWithExampleUnselected
+            ).count == 1,
+            "Search did not restore a result after its mask was unchecked"
+        )
+
+        let institutionNameSearch = PDFMasker.scan(
+            files: [source],
+            exactTerms: ["CHARLES SCHWAB"],
+            options: PatternOptions(detectSSN: false, detectEIN: false, detectEmail: false, detectPhone: false),
+            progress: { _ in }
+        )
+        try require(
+            PDFMasker.searchResults(institutionNameSearch, excludingSelectedMatches: matches).count == institutionNameSearch.count,
+            "Masking an account suffix incorrectly hid its visible institution name from search"
+        )
+
         let exceptionMatches = PDFMasker.scan(
             files: [source],
             exactTerms: [],

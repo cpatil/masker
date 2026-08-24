@@ -36,7 +36,13 @@ struct MaskerUISnapshot {
         model.generateNameVariants = true
         model.detectAccountSuffixes = true
         model.accountSuffixExceptions = "FORM 8879"
-        model.matches = matches
+        var reviewMatches = matches
+        if let index = reviewMatches.firstIndex(where: {
+            $0.matchedText.caseInsensitiveCompare("Joe Farmer") == .orderedSame
+        }) {
+            reviewMatches[index].isSelected = false
+        }
+        model.matches = reviewMatches
         model.status = "Found \(matches.count) matches. Review the checked items before exporting."
         model.pdfSearchText = "FARMER"
         model.revealDetectedValues = true
@@ -59,7 +65,7 @@ struct MaskerUISnapshot {
         hosting.layoutSubtreeIfNeeded()
         RunLoop.current.run(until: Date().addingTimeInterval(4.0))
         hosting.layoutSubtreeIfNeeded()
-        precondition(model.pdfSearchResultCount == 2, "Expected two OCR-capable PDF search results")
+        precondition(model.pdfSearchResultCount == 1, "Search should list only the unchecked Farmer result")
 
         var embeddedPDFView: PDFView?
         if let pdfView = findPDFView(in: hosting), let document = pdfView.document {

@@ -248,6 +248,29 @@ enum PDFMasker {
         return NSImage(cgImage: cgImage, size: displayBounds(for: page).size)
     }
 
+    static func searchResults(
+        _ results: [RedactionMatch],
+        excludingSelectedMatches selectedMatches: [RedactionMatch]
+    ) -> [RedactionMatch] {
+        let selectedByPage = Dictionary(grouping: selectedMatches.filter(\.isSelected)) {
+            "\($0.fileURL.standardizedFileURL.path)|\($0.pageIndex)"
+        }
+
+        return results.filter { result in
+            guard !result.rects.isEmpty else { return true }
+            let key = "\(result.fileURL.standardizedFileURL.path)|\(result.pageIndex)"
+            let selectedRects = selectedByPage[key]?.flatMap(\.rects) ?? []
+            guard !selectedRects.isEmpty else { return true }
+
+            let isCovered = result.rects.allSatisfy { resultRect in
+                let standardized = resultRect.standardized
+                let center = CGPoint(x: standardized.midX, y: standardized.midY)
+                return selectedRects.contains { $0.standardized.contains(center) }
+            }
+            return !isCovered
+        }
+    }
+
     private static func scanTextPage(
         _ page: PDFPage,
         text: String,

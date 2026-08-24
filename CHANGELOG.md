@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1 - 2026-08-24
+
+- Incremental search now omits occurrences already covered by selected masks.
+- Unchecking a mask immediately makes that occurrence searchable again.
+- Institution names remain searchable when only their account suffix is masked.
+
 ## 1.1.0 - 2026-08-24
 
 - Added continuous-scroll PDF review with page-synchronized matches.
