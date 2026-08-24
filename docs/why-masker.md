@@ -12,8 +12,10 @@ PDFs supplied plenty of failures. `FORM 8879` looked like an account number. Acc
 
 Those cases shaped the app. Form numbers and years are excluded from account matching. Page geometry lets Masker cover an account suffix while keeping the institution name and amount visible. OCR is cached, stale searches are cancelled, and search results omit text that is already masked.
 
-The test suite generates its own searchable, scanned, and rotated PDFs. It covers formatted and compact identifiers, shortened names such as `JOE AND MARY FARMER` to `Joe Farmer`, institution rows, and false positives. After export, it opens the sanitized PDF again and searches it using both text extraction and OCR. The test fails if a selected value is still recoverable.
+I also found that black boxes removed too much context. A tax strategist needs to know that a row belongs to Charles Schwab, just not the account number. Masker can now replace a selected value with a generic label such as `<Acct 1>` or `<Name 1>`. Repeated occurrences reuse the same label, while two accounts at the same institution get different ones. During review, an optional hover mode temporarily reveals the original text with a yellow highlight; that view exists only inside the app and is never exported.
 
-Export is intentionally blunt: each page is rebuilt from sanitized pixels at 300 DPI. That produces a larger, non-searchable PDF, but it avoids leaving the original text behind a black rectangle.
+The test suite generates its own searchable, scanned, and rotated PDFs. It covers formatted and compact identifiers, shortened names such as `JOE AND MARY FARMER` to `Joe Farmer`, multiple accounts at one institution, institution rows, and false positives. After export, it opens the sanitized PDF again and searches it using both text extraction and OCR. The test fails if a selected value is still recoverable, including when generic labels are enabled.
+
+Export is intentionally blunt: each page is rebuilt from sanitized pixels at 300 DPI, and any generic label is drawn only after the original pixels are removed. The result contains no original text layer, forms, annotations, or metadata. It is larger than the source. Preview may still make visible text searchable using its own OCR, but the masked values are no longer present in the page image for OCR to recover.
 
 Masker solved the problem I built it for. The source and a universal Apple Silicon/Intel build are available on [GitHub](https://github.com/cpatil/masker/releases/latest).
