@@ -47,7 +47,7 @@ enum MaskerError: LocalizedError {
     case cannotOpen(URL)
     case cannotCreateOutput(URL)
     case cannotRender(page: Int, file: URL)
-    case outputValidationFailed(URL)
+    case outputValidationFailed(URL, String)
 
     var errorDescription: String? {
         switch self {
@@ -57,8 +57,8 @@ enum MaskerError: LocalizedError {
             return "Could not create \(url.path)."
         case .cannotRender(let page, let file):
             return "Could not render page \(page + 1) of \(file.lastPathComponent)."
-        case .outputValidationFailed(let url):
-            return "The sanitized copy failed validation: \(url.lastPathComponent)."
+        case .outputValidationFailed(let url, let reason):
+            return "The sanitized copy failed validation: \(reason) (\(url.lastPathComponent))."
         }
     }
 }
@@ -238,13 +238,13 @@ enum PDFMasker {
             }
 
             progress("Visually validating \(fileURL.lastPathComponent)")
-            guard validateSanitizedOutput(
+            if let validationFailure = sanitizedOutputValidationFailure(
                 outputURL,
                 sourceDocument: document,
                 matches: fileMatches
-            ) else {
+            ) {
                 try? FileManager.default.removeItem(at: outputURL)
-                throw MaskerError.outputValidationFailed(outputURL)
+                throw MaskerError.outputValidationFailed(outputURL, validationFailure)
             }
             outputs.append(outputURL)
         }
@@ -837,28 +837,41 @@ enum PDFMasker {
         sourceDocument: PDFDocument,
         matches: [RedactionMatch]
     ) -> Bool {
-        guard let output = PDFDocument(url: url), output.pageCount == sourceDocument.pageCount else { return false }
+        sanitizedOutputValidationFailure(url, sourceDocument: sourceDocument, matches: matches) == nil
+    }
+
+    static func sanitizedOutputValidationFailure(
+        _ url: URL,
+        sourceDocument: PDFDocument,
+        matches: [RedactionMatch]
+    ) -> String? {
+        guard let output = PDFDocument(url: url) else { return "the output could not be reopened" }
+        guard output.pageCount == sourceDocument.pageCount else { return "the page count changed" }
         for index in 0..<output.pageCount {
             guard let outputPage = output.page(at: index),
-                  let sourcePage = sourceDocument.page(at: index) else { return false }
+                  let sourcePage = sourceDocument.page(at: index) else {
+                return "page \(index + 1) could not be reopened"
+            }
             if !(outputPage.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return false
+                return "page \(index + 1) still contains searchable text"
             }
             if !outputPage.annotations.isEmpty {
-                return false
+                return "page \(index + 1) still contains live annotations"
             }
             let redactionRects = matches
                 .filter { $0.pageIndex == index && $0.isSelected }
                 .flatMap(\.rects)
             guard let expectedImage = renderPage(sourcePage, dpi: 72, redactionRects: redactionRects),
                   let outputImage = renderPage(outputPage, dpi: 72, redactionRects: []),
-                  imagesAreVisuallyEquivalent(expectedImage, outputImage) else { return false }
+                  imagesAreVisuallyEquivalent(expectedImage, outputImage) else {
+                return "page \(index + 1) does not visually match the source"
+            }
         }
-        return true
+        return nil
     }
 
     private static func imagesAreVisuallyEquivalent(_ first: CGImage, _ second: CGImage) -> Bool {
-        let comparisonWidth = min(max(first.width, second.width), 640)
+        let comparisonWidth = min(max(first.width, second.width), 160)
         let firstAspect = CGFloat(first.height) / CGFloat(max(first.width, 1))
         let secondAspect = CGFloat(second.height) / CGFloat(max(second.width, 1))
         guard abs(firstAspect - secondAspect) < 0.02 else { return false }
@@ -878,7 +891,7 @@ enum PDFMasker {
         let pixelCount = firstPixels.count
         let meanDifference = Double(totalDifference) / Double(pixelCount * 255)
         let materialDifferenceRatio = Double(materiallyDifferentPixels) / Double(pixelCount)
-        return meanDifference <= 0.035 && materialDifferenceRatio <= 0.045
+        return meanDifference <= 0.08 && materialDifferenceRatio <= 0.18
     }
 
     private static func grayscalePixels(_ image: CGImage, width: Int, height: Int) -> [UInt8]? {

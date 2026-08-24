@@ -216,21 +216,20 @@ struct MaskerSelfTest {
         )
         try require(created.count == 1, "Expected one output")
         guard let output = PDFDocument(url: created[0]) else { fatalError("Could not reopen output") }
-        try require(output.pageCount == 4, "Expected four pages")
+        try require(output.pageCount == 5, "Expected five pages")
         try require((0..<output.pageCount).allSatisfy { (output.page(at: $0)?.string ?? "").isEmpty }, "Output still has a text layer")
         try require((0..<output.pageCount).allSatisfy { output.page(at: $0)?.annotations.isEmpty == true }, "Output still has annotations")
 
         let corruptOutput = root.appendingPathComponent("deliberately-corrupted-output.pdf")
-        try makeVisuallyCorruptedPDF(at: corruptOutput, pageCount: 4)
+        try makeVisuallyCorruptedPDF(at: corruptOutput, pageCount: 5)
         guard let sourceDocument = PDFDocument(url: source) else { fatalError("Could not reopen source") }
-        try require(
-            !PDFMasker.validateSanitizedOutput(
-                corruptOutput,
-                sourceDocument: sourceDocument,
-                matches: matches + [pathologicalRect]
-            ),
-            "Visual validation accepted a half-corrupted PDF"
+        let corruptFailure = PDFMasker.sanitizedOutputValidationFailure(
+            corruptOutput,
+            sourceDocument: sourceDocument,
+            matches: matches + [pathologicalRect]
         )
+        try require(corruptFailure != nil, "Visual validation accepted a half-corrupted PDF")
+        try require(corruptFailure?.contains("page 1") == true, "Visual validation did not identify the corrupted page")
 
         let residual = PDFMasker.scan(
             files: created,
@@ -313,6 +312,12 @@ struct MaskerSelfTest {
         pdf.fill(mediaBox)
         drawText("ALLY BANK 3436\nCHARLES SCHWAB & CO., INC -8891\nCHARLES SCHWAB 5077\nMERRILL LYNCH - 2396\nMERRILL LYNCH 21807\nVANGUARD #2759\nWEALTHFRONT - 4985\nCHARLES SCHWAB 2759 STC\nALLY BANK 0684.......... $ 4,277.\nMERRILL LYNCH - 9550.......... 431.\nNORTHSTAR 0421.......... 88.\nTOTAL 777.......... 88.\nHDFC BANK IN INDIA.......... 129.\nIDBI.......... 254.\nBLACKSTONE PRIVATE CREDIT FUND\nVANGUARD #2025\nFORM 1040\nINTERNAL REVENUE SERVICE FORM 8879\nTAX YEAR 2025", in: pdf, at: CGPoint(x: 72, y: 740), fontSize: 16, frameHeight: 500)
         pdf.endPDFPage()
+
+        pdf.beginPDFPage(nil)
+        pdf.setFillColor(NSColor.white.cgColor)
+        pdf.fill(mediaBox)
+        drawDenseTaxStylePage(in: pdf)
+        pdf.endPDFPage()
         pdf.closePDF()
 
         if let document = PDFDocument(url: url) {
@@ -351,6 +356,28 @@ struct MaskerSelfTest {
             pdf.endPDFPage()
         }
         pdf.closePDF()
+    }
+
+    private static func drawDenseTaxStylePage(in context: CGContext) {
+        context.setStrokeColor(NSColor.black.cgColor)
+        context.setLineWidth(1)
+        context.stroke(CGRect(x: 36, y: 36, width: 540, height: 720))
+        drawText("FEDERAL INCOME TAX SUMMARY", in: context, at: CGPoint(x: 180, y: 740), fontSize: 11, frameHeight: 20)
+        for column in 0..<3 {
+            let x = CGFloat(54 + column * 178)
+            for row in 0..<72 {
+                let y = CGFloat(710 - row * 9)
+                let label = "LINE \(row + 1): ITEMIZED VALUE $\(1000 + column * 100 + row).00"
+                drawText(label, in: context, at: CGPoint(x: x, y: y), fontSize: 6.5, frameHeight: 9)
+                if row.isMultiple(of: 8) {
+                    context.setStrokeColor(NSColor(calibratedWhite: 0.72, alpha: 1).cgColor)
+                    context.setLineWidth(0.35)
+                    context.move(to: CGPoint(x: x, y: y - 1))
+                    context.addLine(to: CGPoint(x: x + 160, y: y - 1))
+                    context.strokePath()
+                }
+            }
+        }
     }
 
     private static func makeBoundaryPDF(at url: URL) throws {

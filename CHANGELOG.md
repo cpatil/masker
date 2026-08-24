@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.2 - 2026-08-24
+
+- Prevents false visual-validation failures on dense, small-text tax pages by comparing coarse page structure instead of font-edge pixels.
+- Names the specific page and validation reason when an export is rejected.
+- Adds a dense three-column tax-style regression page while retaining the deliberately corrupted-page rejection test.
+
 ## 1.3.1 - 2026-08-24
 
 - Adds Import Values beside each recent PDF for restoring a Masker JSON export.
