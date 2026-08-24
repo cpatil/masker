@@ -39,6 +39,7 @@ struct PatternOptions {
     var detectEmail = false
     var detectPhone = false
     var generateNameVariants = false
+    var detectAccountSuffixes = false
 }
 
 enum MaskerError: LocalizedError {
@@ -273,6 +274,14 @@ enum PDFMasker {
                 }
             }
         }
+        if options.detectAccountSuffixes {
+            matches.append(contentsOf: nativeAccountSuffixMatches(
+                page: page,
+                text: text,
+                fileURL: fileURL,
+                pageIndex: pageIndex
+            ))
+        }
         return matches
     }
 
@@ -371,6 +380,20 @@ enum PDFMasker {
                     ))
                 }
             }
+
+            if options.detectAccountSuffixes,
+               let suffix = accountSuffixRange(in: line),
+               let swiftRange = Range(suffix, in: line),
+               let box = try? candidate.boundingBox(for: swiftRange) {
+                matches.append(ocrMatch(
+                    box: box.boundingBox,
+                    displaySize: displayRect.size,
+                    fileURL: fileURL,
+                    pageIndex: pageIndex,
+                    category: "Account suffix (OCR)",
+                    text: nsLine.substring(with: suffix)
+                ))
+            }
         }
         return matches
     }
@@ -413,6 +436,90 @@ enum PDFMasker {
             rules.append(PatternRule(label: "Phone", expression: #"(?<!\d)(?:\+?1[ .-]?)?(?:\(\d{3}\)|\d{3})[ .-]\d{3}[ .-]\d{4}(?!\d)"#))
         }
         return rules
+    }
+
+    private static func nativeAccountSuffixMatches(
+        page: PDFPage,
+        text: String,
+        fileURL: URL,
+        pageIndex: Int
+    ) -> [RedactionMatch] {
+        let nsText = text as NSString
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        return accountSuffixRegex.matches(in: text, range: fullRange).compactMap { result in
+            let prefixRange = result.range(at: 1)
+            let suffixRange = result.range(at: 2)
+            guard prefixRange.location != NSNotFound,
+                  suffixRange.location != NSNotFound,
+                  isInstitutionLikeAccountPrefix(
+                    nsText.substring(with: prefixRange),
+                    suffix: nsText.substring(with: suffixRange)
+                  ) else { return nil }
+            return nativeMatch(
+                page: page,
+                range: suffixRange,
+                fileURL: fileURL,
+                pageIndex: pageIndex,
+                category: "Account suffix",
+                text: nsText.substring(with: suffixRange)
+            )
+        }
+    }
+
+    private static func accountSuffixRange(in line: String) -> NSRange? {
+        let nsLine = line as NSString
+        let fullRange = NSRange(location: 0, length: nsLine.length)
+        guard let result = accountSuffixRegex.firstMatch(in: line, range: fullRange) else { return nil }
+        let prefixRange = result.range(at: 1)
+        let suffixRange = result.range(at: 2)
+        guard prefixRange.location != NSNotFound,
+              suffixRange.location != NSNotFound,
+              isInstitutionLikeAccountPrefix(
+                nsLine.substring(with: prefixRange),
+                suffix: nsLine.substring(with: suffixRange)
+              ) else { return nil }
+        return suffixRange
+    }
+
+    private static let accountSuffixRegex = try! NSRegularExpression(
+        pattern: #"(?m)^([^\r\n]*?)([0-9]{3,8})[ \t_-]*$"#
+    )
+
+    private static func isInstitutionLikeAccountPrefix(_ prefix: String, suffix: String) -> Bool {
+        guard let rawLast = prefix.last,
+              rawLast.isWhitespace || rawLast == "-" || rawLast == "#" else { return false }
+
+        let trimmed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              !trimmed.contains(where: \.isNumber),
+              !trimmed.contains("$"),
+              !trimmed.contains("/"),
+              !trimmed.contains(":"),
+              !trimmed.contains("=") else { return false }
+
+        let explicitSeparator = trimmed.last == "-" || trimmed.last == "#"
+        let words = trimmed
+            .split(whereSeparator: { $0.isWhitespace })
+            .map { token in String(token).filter { $0.isLetter || $0 == "'" || $0 == "&" } }
+            .filter { !$0.isEmpty && $0 != "&" }
+        guard !words.isEmpty, words.joined().count >= 4 else { return false }
+
+        let stopWords: Set<String> = [
+            "AMOUNT", "BOX", "DATE", "FORM", "LINE", "NOTE", "PAGE", "PART",
+            "SCHEDULE", "SECTION", "SUBTOTAL", "TAX", "TOTAL", "YEAR"
+        ]
+        guard let firstWord = words.first?.uppercased(), !stopWords.contains(firstWord) else { return false }
+
+        let hasLowercase = trimmed.unicodeScalars.contains { CharacterSet.lowercaseLetters.contains($0) }
+        let isAllCaps = !hasLowercase
+        guard explicitSeparator || (isAllCaps && words.count >= 2) else { return false }
+
+        if let numericSuffix = Int(suffix),
+           suffix.count == 4,
+           (1900...2099).contains(numericSuffix) {
+            return false
+        }
+        return true
     }
 
     private static func searchRules(for exactTerms: [String], options: PatternOptions) -> [SearchRule] {

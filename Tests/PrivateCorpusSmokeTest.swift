@@ -25,7 +25,13 @@ struct PrivateCorpusSmokeTest {
         }
         try require(readableFiles == files.count, "One or more fixtures could not be opened.")
 
-        let options = PatternOptions(detectSSN: true, detectEIN: true, detectEmail: true, detectPhone: true)
+        let options = PatternOptions(
+            detectSSN: true,
+            detectEIN: true,
+            detectEmail: true,
+            detectPhone: true,
+            detectAccountSuffixes: true
+        )
         let matches = PDFMasker.scan(files: files, exactTerms: [], options: options, progress: { _ in })
         let matchedFiles = Set(matches.map { $0.fileURL.standardizedFileURL }).count
         report("Corpus scan passed: files=\(files.count) pages=\(totalPages) filesWithMatches=\(matchedFiles) matches=\(matches.count)")

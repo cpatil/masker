@@ -27,6 +27,7 @@ final class MaskerModel: ObservableObject {
     @Published var detectEmail = false
     @Published var detectPhone = false
     @Published var generateNameVariants = false
+    @Published var detectAccountSuffixes = false
     @Published var matches: [RedactionMatch] = []
     @Published var selectedMatchID: UUID?
     @Published var activeFileURL: URL?
@@ -84,7 +85,8 @@ final class MaskerModel: ObservableObject {
             detectEIN: detectEIN,
             detectEmail: detectEmail,
             detectPhone: detectPhone,
-            generateNameVariants: generateNameVariants
+            generateNameVariants: generateNameVariants,
+            detectAccountSuffixes: detectAccountSuffixes
         )
         let inputFiles = files
         let previouslyActiveFile = activeFileURL
@@ -325,6 +327,10 @@ struct ContentView: View {
                         Toggle("Employer ID (EIN)", isOn: $model.detectEIN)
                         Toggle("Email addresses", isOn: $model.detectEmail)
                         Toggle("US phone numbers", isOn: $model.detectPhone)
+                        Toggle("Institution account suffixes", isOn: $model.detectAccountSuffixes)
+                        Text("Opt-in: masks only a trailing 3-8 digit identifier on institution-like lines. Names remain visible.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                         Toggle("First + last name variants", isOn: $model.generateNameVariants)
                         Text("Opt-in: a value such as “JOE AND MARY FARMER” also searches for “JOE FARMER.” Review these matches carefully.")
                             .font(.caption)

@@ -20,7 +20,8 @@ struct MaskerUISnapshot {
                 detectEIN: true,
                 detectEmail: true,
                 detectPhone: true,
-                generateNameVariants: true
+                generateNameVariants: true,
+                detectAccountSuffixes: true
             ),
             progress: { _ in }
         )
@@ -33,6 +34,7 @@ struct MaskerUISnapshot {
         model.detectEmail = true
         model.detectPhone = true
         model.generateNameVariants = true
+        model.detectAccountSuffixes = true
         model.matches = matches
         model.status = "Found \(matches.count) matches. Review the checked items before exporting."
         model.pdfSearchText = "FARMER"

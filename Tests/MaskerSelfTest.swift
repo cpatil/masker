@@ -44,7 +44,7 @@ struct MaskerSelfTest {
         let matches = PDFMasker.scan(
             files: [source],
             exactTerms: ["Example Person", "JOE AND MARY FARMER", "444-55-6666", "555-66-7777"],
-            options: PatternOptions(detectSSN: true, detectEIN: true, detectEmail: true, detectPhone: true, generateNameVariants: true),
+            options: PatternOptions(detectSSN: true, detectEIN: true, detectEmail: true, detectPhone: true, generateNameVariants: true, detectAccountSuffixes: true),
             progress: { _ in }
         )
 
@@ -71,6 +71,12 @@ struct MaskerSelfTest {
         try require(matches.contains(where: { $0.matchedText == "98-7654321" }), "Failed to detect EIN")
         try require(matches.contains(where: { $0.matchedText == "alpha@example.com" }), "Failed to detect email")
         try require(matches.contains(where: { $0.matchedText == "(415) 555-0198" }), "Failed to detect phone")
+        let accountSuffixes = matches
+            .filter { $0.category.hasPrefix("Account suffix") }
+            .map(\.matchedText)
+        let expectedSuffixes = ["3436", "8891", "5077", "2396", "21807", "2759", "4985", "7788"]
+        try require(Set(accountSuffixes) == Set(expectedSuffixes), "Account suffix detection mismatch: \(accountSuffixes)")
+        try require(!accountSuffixes.contains("1040") && !accountSuffixes.contains("2025"), "Form number or tax year was mistaken for an account suffix")
 
         let noNameVariants = PDFMasker.scan(
             files: [source],
@@ -97,17 +103,28 @@ struct MaskerSelfTest {
         )
         try require(created.count == 1, "Expected one output")
         guard let output = PDFDocument(url: created[0]) else { fatalError("Could not reopen output") }
-        try require(output.pageCount == 3, "Expected three pages")
+        try require(output.pageCount == 4, "Expected four pages")
         try require((0..<output.pageCount).allSatisfy { (output.page(at: $0)?.string ?? "").isEmpty }, "Output still has a text layer")
         try require((0..<output.pageCount).allSatisfy { output.page(at: $0)?.annotations.isEmpty == true }, "Output still has annotations")
 
         let residual = PDFMasker.scan(
             files: created,
-            exactTerms: ["Example Person", "JOE AND MARY FARMER", "JOE FARMER", "123-45-6789", "123456789", "444-55-6666", "555-66-7777", "98-7654321", "987654321", "alpha@example.com", "(415) 555-0198"],
-            options: PatternOptions(detectSSN: true, detectEIN: true, detectEmail: true, detectPhone: true, generateNameVariants: true),
+            exactTerms: ["Example Person", "JOE AND MARY FARMER", "JOE FARMER", "123-45-6789", "123456789", "444-55-6666", "555-66-7777", "98-7654321", "987654321", "alpha@example.com", "(415) 555-0198"] + expectedSuffixes,
+            options: PatternOptions(detectSSN: true, detectEIN: true, detectEmail: true, detectPhone: true, generateNameVariants: true, detectAccountSuffixes: true),
             progress: { _ in }
         )
         try require(residual.isEmpty, "OCR found sensitive text after sanitization: \(residual.map(\.matchedText))")
+
+        let preservedInstitutions = PDFMasker.scan(
+            files: created,
+            exactTerms: ["ALLY BANK", "CHARLES SCHWAB", "MERRILL LYNCH", "VANGUARD", "WEALTHFRONT", "FIDELITY"],
+            options: PatternOptions(detectSSN: false, detectEIN: false, detectEmail: false, detectPhone: false),
+            progress: { _ in }
+        )
+        let preservedNames = Set(preservedInstitutions.map { $0.matchedText.uppercased() })
+        for institution in ["ALLY BANK", "CHARLES SCHWAB", "MERRILL LYNCH", "VANGUARD", "WEALTHFRONT", "FIDELITY"] {
+            try require(preservedNames.contains(institution), "Institution name was not preserved: \(institution)")
+        }
 
         report("PASS source=\(source.path)")
         report("PASS output=\(created[0].path)")
@@ -145,6 +162,12 @@ struct MaskerSelfTest {
         pdf.setFillColor(NSColor.white.cgColor)
         pdf.fill(mediaBox)
         drawText("ROTATED PAGE\nSSN: 555-66-7777", in: pdf, at: CGPoint(x: 72, y: 650))
+        pdf.endPDFPage()
+
+        pdf.beginPDFPage(nil)
+        pdf.setFillColor(NSColor.white.cgColor)
+        pdf.fill(mediaBox)
+        drawText("ALLY BANK 3436\nCHARLES SCHWAB & CO., INC -8891\nCHARLES SCHWAB 5077\nMERRILL LYNCH - 2396\nMERRILL LYNCH 21807\nVANGUARD #2759\nWEALTHFRONT - 4985\nBLACKSTONE PRIVATE CREDIT FUND\nVANGUARD #2025\nFORM 1040\nTAX YEAR 2025", in: pdf, at: CGPoint(x: 72, y: 700))
         pdf.endPDFPage()
         pdf.closePDF()
 
@@ -194,7 +217,7 @@ struct MaskerSelfTest {
         context.setFillColor(NSColor.white.cgColor)
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         context.scaleBy(x: 2, y: 2)
-        drawText("SCANNED FORM\nTax ID: 444-55-6666", in: context, at: CGPoint(x: 70, y: 300))
+        drawText("SCANNED FORM\nTax ID: 444-55-6666\nFIDELITY - 7788", in: context, at: CGPoint(x: 70, y: 300))
         return context.makeImage()
     }
 }

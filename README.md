@@ -16,6 +16,8 @@ The app never uploads documents or values. Image-only pages are processed with A
 
 When a formatted SSN/ITIN or EIN is detected, Masker also searches that document for the same nine digits without separators. Digit boundaries prevent matches inside longer numbers.
 
+**Institution account suffixes** is opt-in. It detects institution-like lines ending in a 3-8 digit identifier and masks only those trailing digits, leaving the institution name visible. It rejects common form, line, page, amount, and tax-year patterns; standalone values from 1900 through 2099 are always treated as years. Every match should still be reviewed.
+
 **First + last name variants** is opt-in. For an exact value such as `JOE AND MARY FARMER`, it also searches for `JOE FARMER`. This is intentionally not enabled by default because shortened names can produce false positives.
 
 ## Safety model
