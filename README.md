@@ -8,10 +8,15 @@ Masker is a small, offline macOS app for permanently redacting repeated personal
 2. Drop in one or more PDFs.
 3. Enter exact values to mask, one per line. Common SSN/ITIN and EIN patterns are enabled by default.
 4. Click **Scan PDFs Locally**.
-5. Review every detected match and uncheck anything that should remain visible.
-6. Click **Create Sanitized Copies**.
+5. Scroll through the complete PDF. The match list follows the visible page; uncheck anything that should remain visible.
+6. Use the PDF search box to inspect other strings. **Add & Rescan** adds the search text to the exact-value list.
+7. Click **Create Sanitized Copies**.
 
 The app never uploads documents or values. Image-only pages are processed with Apple's on-device Vision OCR.
+
+When a formatted SSN/ITIN or EIN is detected, Masker also searches that document for the same nine digits without separators. Digit boundaries prevent matches inside longer numbers.
+
+**First + last name variants** is opt-in. For an exact value such as `JOE AND MARY FARMER`, it also searches for `JOE FARMER`. This is intentionally not enabled by default because shortened names can produce false positives.
 
 ## Safety model
 

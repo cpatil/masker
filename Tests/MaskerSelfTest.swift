@@ -15,9 +15,11 @@ struct MaskerSelfTest {
         let root = URL(fileURLWithPath: CommandLine.arguments.dropFirst().first ?? "/tmp/masker-self-test", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let source = root.appendingPathComponent("sample-tax-document.pdf")
+        let boundarySource = root.appendingPathComponent("digit-boundary-document.pdf")
         let outputs = root.appendingPathComponent("outputs", isDirectory: true)
 
         try makeSamplePDF(at: source)
+        try makeBoundaryPDF(at: boundarySource)
         if let doc = PDFDocument(url: source) {
             report("Page strings: \((0..<doc.pageCount).map { String(describing: doc.page(at: $0)?.string) })")
         }
@@ -41,15 +43,15 @@ struct MaskerSelfTest {
 
         let matches = PDFMasker.scan(
             files: [source],
-            exactTerms: ["Example Person", "987-65-4321", "555-66-7777"],
-            options: PatternOptions(detectSSN: true, detectEIN: true, detectEmail: true, detectPhone: true),
+            exactTerms: ["Example Person", "JOE AND MARY FARMER", "444-55-6666", "555-66-7777"],
+            options: PatternOptions(detectSSN: true, detectEIN: true, detectEmail: true, detectPhone: true, generateNameVariants: true),
             progress: { _ in }
         )
 
         report("Detected: \(matches.map { "[\($0.category)] \($0.matchedText) rects=\($0.rects)" }.joined(separator: ", "))")
 
         let nativeSSNs = matches.filter { $0.matchedText == "123-45-6789" }
-        let scannedSSNs = matches.filter { $0.matchedText == "987-65-4321" }
+        let scannedSSNs = matches.filter { $0.matchedText == "444-55-6666" }
         let rotatedSSNs = matches.filter { $0.matchedText == "555-66-7777" }
         if !rotatedSSNs.isEmpty,
            let preview = PDFMasker.previewImage(fileURL: source, pageIndex: 2, matches: rotatedSSNs, dpi: 180),
@@ -63,9 +65,28 @@ struct MaskerSelfTest {
         try require(!scannedSSNs.isEmpty, "Failed to detect the image-only SSN using OCR")
         try require(!rotatedSSNs.isEmpty, "Failed to detect the rotated-page SSN")
         try require(matches.contains(where: { $0.matchedText.caseInsensitiveCompare("Example Person") == .orderedSame }), "Failed to detect exact name")
-        try require(matches.contains(where: { $0.matchedText == "12-3456789" }), "Failed to detect EIN")
+        try require(matches.contains(where: { $0.matchedText == "JOE FARMER" && $0.category == "Name variant" }), "Failed to detect first + last name variant")
+        try require(matches.filter({ $0.matchedText == "123456789" && $0.category.hasPrefix("SSN / ITIN compact") }).count == 1, "Failed compact SSN detection")
+        try require(matches.contains(where: { $0.matchedText == "987654321" && $0.category.hasPrefix("EIN compact") }), "Failed to detect compact EIN variant")
+        try require(matches.contains(where: { $0.matchedText == "98-7654321" }), "Failed to detect EIN")
         try require(matches.contains(where: { $0.matchedText == "alpha@example.com" }), "Failed to detect email")
         try require(matches.contains(where: { $0.matchedText == "(415) 555-0198" }), "Failed to detect phone")
+
+        let noNameVariants = PDFMasker.scan(
+            files: [source],
+            exactTerms: ["JOE AND MARY FARMER"],
+            options: PatternOptions(detectSSN: false, detectEIN: false, detectEmail: false, detectPhone: false, generateNameVariants: false),
+            progress: { _ in }
+        )
+        try require(!noNameVariants.contains(where: { $0.matchedText == "JOE FARMER" }), "Name variants should be opt-in")
+
+        let boundaryMatches = PDFMasker.scan(
+            files: [boundarySource],
+            exactTerms: [],
+            options: PatternOptions(detectSSN: true, detectEIN: false, detectEmail: false, detectPhone: false),
+            progress: { _ in }
+        )
+        try require(!boundaryMatches.contains(where: { $0.category.hasPrefix("SSN / ITIN compact") }), "Compact identifier matched inside a longer number")
 
         let created = try PDFMasker.exportSanitizedCopies(
             files: [source],
@@ -82,8 +103,8 @@ struct MaskerSelfTest {
 
         let residual = PDFMasker.scan(
             files: created,
-            exactTerms: ["Example Person", "123-45-6789", "987-65-4321", "555-66-7777", "12-3456789", "alpha@example.com", "(415) 555-0198"],
-            options: PatternOptions(detectSSN: true, detectEIN: true, detectEmail: true, detectPhone: true),
+            exactTerms: ["Example Person", "JOE AND MARY FARMER", "JOE FARMER", "123-45-6789", "123456789", "444-55-6666", "555-66-7777", "98-7654321", "987654321", "alpha@example.com", "(415) 555-0198"],
+            options: PatternOptions(detectSSN: true, detectEIN: true, detectEmail: true, detectPhone: true, generateNameVariants: true),
             progress: { _ in }
         )
         try require(residual.isEmpty, "OCR found sensitive text after sanitization: \(residual.map(\.matchedText))")
@@ -109,7 +130,7 @@ struct MaskerSelfTest {
         pdf.beginPDFPage(nil)
         pdf.setFillColor(NSColor.white.cgColor)
         pdf.fill(mediaBox)
-        drawText("Taxpayer: Example Person\nSSN: 123-45-6789\nEIN: 12-3456789\nEmail: alpha@example.com\nPhone: (415) 555-0198", in: pdf, at: CGPoint(x: 72, y: 650))
+        drawText("Taxpayer: Example Person\nOwners: JOE AND MARY FARMER\nShort form: JOE FARMER\nSSN: 123-45-6789\nSSN copy: 123456789\nEIN: 98-7654321\nEIN copy: 987654321\nEmail: alpha@example.com\nPhone: (415) 555-0198", in: pdf, at: CGPoint(x: 72, y: 700))
         pdf.endPDFPage()
 
         pdf.beginPDFPage(nil)
@@ -133,6 +154,18 @@ struct MaskerSelfTest {
         }
     }
 
+    private static func makeBoundaryPDF(at url: URL) throws {
+        guard let consumer = CGDataConsumer(url: url as CFURL) else { fatalError("No PDF consumer") }
+        var mediaBox = CGRect(x: 0, y: 0, width: 612, height: 792)
+        guard let pdf = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else { fatalError("No PDF context") }
+        pdf.beginPDFPage(nil)
+        pdf.setFillColor(NSColor.white.cgColor)
+        pdf.fill(mediaBox)
+        drawText("SSN: 123-45-6789\nLong number: 01234567890", in: pdf, at: CGPoint(x: 72, y: 700))
+        pdf.endPDFPage()
+        pdf.closePDF()
+    }
+
     private static func drawText(_ text: String, in context: CGContext, at point: CGPoint) {
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 20),
@@ -140,7 +173,7 @@ struct MaskerSelfTest {
         ]
         let attributed = NSAttributedString(string: text, attributes: attributes)
         let framesetter = CTFramesetterCreateWithAttributedString(attributed)
-        let path = CGPath(rect: CGRect(x: point.x, y: point.y - 180, width: 470, height: 180), transform: nil)
+        let path = CGPath(rect: CGRect(x: point.x, y: point.y - 300, width: 470, height: 300), transform: nil)
         let frame = CTFramesetterCreateFrame(framesetter, CFRange(), path, nil)
         CTFrameDraw(frame, context)
     }
@@ -161,7 +194,7 @@ struct MaskerSelfTest {
         context.setFillColor(NSColor.white.cgColor)
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         context.scaleBy(x: 2, y: 2)
-        drawText("SCANNED FORM\nTax ID: 987-65-4321", in: context, at: CGPoint(x: 70, y: 260))
+        drawText("SCANNED FORM\nTax ID: 444-55-6666", in: context, at: CGPoint(x: 70, y: 300))
         return context.makeImage()
     }
 }

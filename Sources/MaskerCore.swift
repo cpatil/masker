@@ -38,6 +38,7 @@ struct PatternOptions {
     var detectEIN = true
     var detectEmail = false
     var detectPhone = false
+    var generateNameVariants = false
 }
 
 enum MaskerError: LocalizedError {
@@ -66,6 +67,12 @@ enum PDFMasker {
         let expression: String
     }
 
+    private struct SearchRule {
+        let label: String
+        let value: String
+        let requiresDigitBoundaries: Bool
+    }
+
     static func scan(
         files: [URL],
         exactTerms: [String],
@@ -73,9 +80,11 @@ enum PDFMasker {
         progress: @escaping (String) -> Void
     ) -> [RedactionMatch] {
         var allMatches: [RedactionMatch] = []
+        let primaryRules = searchRules(for: exactTerms, options: options)
 
         for fileURL in files {
             guard let document = PDFDocument(url: fileURL) else { continue }
+            var fileMatches: [RedactionMatch] = []
             for pageIndex in 0..<document.pageCount {
                 autoreleasepool {
                     progress("Scanning \(fileURL.lastPathComponent), page \(pageIndex + 1) of \(document.pageCount)")
@@ -88,7 +97,7 @@ enum PDFMasker {
                             page,
                             fileURL: fileURL,
                             pageIndex: pageIndex,
-                            exactTerms: exactTerms,
+                            searchRules: primaryRules,
                             options: options
                         )
                     } else {
@@ -97,13 +106,45 @@ enum PDFMasker {
                             text: pageText,
                             fileURL: fileURL,
                             pageIndex: pageIndex,
-                            exactTerms: exactTerms,
+                            searchRules: primaryRules,
                             options: options
                         )
                     }
-                    allMatches.append(contentsOf: pageMatches)
+                    fileMatches.append(contentsOf: pageMatches)
                 }
             }
+
+            let compactRules = compactIdentifierRules(from: fileMatches)
+            if !compactRules.isEmpty {
+                for pageIndex in 0..<document.pageCount {
+                    autoreleasepool {
+                        progress("Checking identifier variants in \(fileURL.lastPathComponent), page \(pageIndex + 1) of \(document.pageCount)")
+                        guard let page = document.page(at: pageIndex) else { return }
+                        let pageText = page.string ?? ""
+                        let variantMatches: [RedactionMatch]
+                        if pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            variantMatches = scanImagePage(
+                                page,
+                                fileURL: fileURL,
+                                pageIndex: pageIndex,
+                                searchRules: compactRules,
+                                options: PatternOptions(detectSSN: false, detectEIN: false, detectEmail: false, detectPhone: false)
+                            )
+                        } else {
+                            variantMatches = scanTextPage(
+                                page,
+                                text: pageText,
+                                fileURL: fileURL,
+                                pageIndex: pageIndex,
+                                searchRules: compactRules,
+                                options: PatternOptions(detectSSN: false, detectEIN: false, detectEmail: false, detectPhone: false)
+                            )
+                        }
+                        fileMatches.append(contentsOf: variantMatches)
+                    }
+                }
+            }
+            allMatches.append(contentsOf: fileMatches)
         }
 
         return deduplicated(allMatches)
@@ -189,23 +230,24 @@ enum PDFMasker {
         text: String,
         fileURL: URL,
         pageIndex: Int,
-        exactTerms: [String],
+        searchRules: [SearchRule],
         options: PatternOptions
     ) -> [RedactionMatch] {
         let nsText = text as NSString
         var matches: [RedactionMatch] = []
 
-        for term in exactTerms where !term.isEmpty {
+        for rule in searchRules where !rule.value.isEmpty {
             var searchRange = NSRange(location: 0, length: nsText.length)
             while searchRange.location < nsText.length {
-                let found = nsText.range(of: term, options: [.caseInsensitive, .diacriticInsensitive], range: searchRange)
+                let found = nsText.range(of: rule.value, options: [.caseInsensitive, .diacriticInsensitive], range: searchRange)
                 guard found.location != NSNotFound else { break }
-                if let match = nativeMatch(
+                if (!rule.requiresDigitBoundaries || hasDigitBoundaries(in: nsText, range: found)),
+                   let match = nativeMatch(
                     page: page,
                     range: found,
                     fileURL: fileURL,
                     pageIndex: pageIndex,
-                    category: "Exact value",
+                    category: rule.label,
                     text: nsText.substring(with: found)
                 ) {
                     matches.append(match)
@@ -267,7 +309,7 @@ enum PDFMasker {
         _ page: PDFPage,
         fileURL: URL,
         pageIndex: Int,
-        exactTerms: [String],
+        searchRules: [SearchRule],
         options: PatternOptions
     ) -> [RedactionMatch] {
         guard let image = renderPage(page, dpi: 180, redactionRects: []) else { return [] }
@@ -291,19 +333,20 @@ enum PDFMasker {
             let line = candidate.string
             let nsLine = line as NSString
 
-            for term in exactTerms where !term.isEmpty {
+            for rule in searchRules where !rule.value.isEmpty {
                 var searchRange = NSRange(location: 0, length: nsLine.length)
                 while searchRange.location < nsLine.length {
-                    let found = nsLine.range(of: term, options: [.caseInsensitive, .diacriticInsensitive], range: searchRange)
+                    let found = nsLine.range(of: rule.value, options: [.caseInsensitive, .diacriticInsensitive], range: searchRange)
                     guard found.location != NSNotFound else { break }
-                    if let swiftRange = Range(found, in: line),
+                    if (!rule.requiresDigitBoundaries || hasDigitBoundaries(in: nsLine, range: found)),
+                       let swiftRange = Range(found, in: line),
                        let box = try? candidate.boundingBox(for: swiftRange) {
                         matches.append(ocrMatch(
                             box: box.boundingBox,
                             displaySize: displayRect.size,
                             fileURL: fileURL,
                             pageIndex: pageIndex,
-                            category: "Exact value (OCR)",
+                            category: rule.label + " (OCR)",
                             text: nsLine.substring(with: found)
                         ))
                     }
@@ -370,6 +413,74 @@ enum PDFMasker {
             rules.append(PatternRule(label: "Phone", expression: #"(?<!\d)(?:\+?1[ .-]?)?(?:\(\d{3}\)|\d{3})[ .-]\d{3}[ .-]\d{4}(?!\d)"#))
         }
         return rules
+    }
+
+    private static func searchRules(for exactTerms: [String], options: PatternOptions) -> [SearchRule] {
+        var rules: [SearchRule] = []
+        var seen = Set<String>()
+
+        for term in exactTerms {
+            let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let exactKey = trimmed.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            if seen.insert(exactKey).inserted {
+                rules.append(SearchRule(label: "Exact value", value: trimmed, requiresDigitBoundaries: false))
+            }
+
+            if options.generateNameVariants, let variant = firstAndLastNameVariant(from: trimmed) {
+                let variantKey = variant.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                if seen.insert(variantKey).inserted {
+                    rules.append(SearchRule(label: "Name variant", value: variant, requiresDigitBoundaries: false))
+                }
+            }
+        }
+        return rules
+    }
+
+    private static func firstAndLastNameVariant(from value: String) -> String? {
+        let tokens = value.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard (3...8).contains(tokens.count) else { return nil }
+        let allowed = CharacterSet.letters.union(CharacterSet(charactersIn: "'-.’"))
+        guard tokens.allSatisfy({ token in
+            !token.isEmpty && token.unicodeScalars.allSatisfy { allowed.contains($0) }
+        }) else { return nil }
+        guard let first = tokens.first, let last = tokens.last, first.count >= 2, last.count >= 2 else { return nil }
+        return "\(first) \(last)"
+    }
+
+    private static func compactIdentifierRules(from matches: [RedactionMatch]) -> [SearchRule] {
+        var rules: [SearchRule] = []
+        var seen = Set<String>()
+
+        for match in matches {
+            let baseLabel: String?
+            if match.category.hasPrefix("SSN / ITIN") {
+                baseLabel = "SSN / ITIN compact variant"
+            } else if match.category.hasPrefix("EIN") {
+                baseLabel = "EIN compact variant"
+            } else {
+                baseLabel = nil
+            }
+            guard let label = baseLabel else { continue }
+            let digits = match.matchedText.filter(\.isNumber)
+            guard digits.count == 9, seen.insert("\(label)|\(digits)").inserted else { continue }
+            rules.append(SearchRule(label: label, value: digits, requiresDigitBoundaries: true))
+        }
+        return rules
+    }
+
+    private static func hasDigitBoundaries(in text: NSString, range: NSRange) -> Bool {
+        let decimalDigits = CharacterSet.decimalDigits
+        if range.location > 0 {
+            let previous = text.substring(with: NSRange(location: range.location - 1, length: 1))
+            if previous.unicodeScalars.contains(where: { decimalDigits.contains($0) }) { return false }
+        }
+        let nextLocation = range.location + range.length
+        if nextLocation < text.length {
+            let next = text.substring(with: NSRange(location: nextLocation, length: 1))
+            if next.unicodeScalars.contains(where: { decimalDigits.contains($0) }) { return false }
+        }
+        return true
     }
 
     private static func deduplicated(_ matches: [RedactionMatch]) -> [RedactionMatch] {
