@@ -20,26 +20,40 @@ struct MaskerApp: App {
 }
 #endif
 
-private struct FilenameHoverPopover: ViewModifier {
+private struct FilenameHoverTooltip: ViewModifier {
     let filename: String
     @State private var isHovering = false
 
     func body(content: Content) -> some View {
         content
             .onHover { isHovering = $0 }
-            .popover(isPresented: $isHovering, arrowEdge: .bottom) {
-                Text(filename)
-                    .font(.callout)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
+            .overlay(alignment: .topLeading) {
+                if isHovering {
+                    Text(filename)
+                        .font(.caption)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color.secondary.opacity(0.35), lineWidth: 0.5)
+                        )
+                        .shadow(radius: 4, y: 2)
+                        .offset(y: 24)
+                        .allowsHitTesting(false)
+                        .zIndex(100)
+                }
             }
+            .zIndex(isHovering ? 100 : 0)
     }
 }
 
 private extension View {
     func fullFilenameOnHover(_ filename: String) -> some View {
-        modifier(FilenameHoverPopover(filename: filename))
+        modifier(FilenameHoverTooltip(filename: filename))
     }
 }
 
@@ -277,12 +291,16 @@ final class MaskerModel: ObservableObject {
         panel.allowedContentTypes = [.json]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
-        guard panel.runModal() == .OK, let source = panel.url else { return }
+        panel.begin { [weak self] response in
+            guard response == .OK, let source = panel.url else { return }
+            self?.finishImportingStashedMaskValues(from: source, for: file)
+        }
+    }
 
+    private func finishImportingStashedMaskValues(from source: URL, for file: URL) {
         do {
-            let data = try Data(contentsOf: source, options: .mappedIfSafe)
             do {
-                try importStashedMaskValuesJSON(data, for: file)
+                try importStashedMaskValuesFile(source, for: file)
             } catch MaskValuesImportError.filenameMismatch(let exported, let selected) {
                 let alert = NSAlert()
                 alert.alertStyle = .warning
@@ -291,11 +309,25 @@ final class MaskerModel: ObservableObject {
                 alert.addButton(withTitle: "Import Anyway")
                 alert.addButton(withTitle: "Cancel")
                 guard alert.runModal() == .alertFirstButtonReturn else { return }
-                try importStashedMaskValuesJSON(data, for: file, allowMismatchedFilename: true)
+                try importStashedMaskValuesFile(source, for: file, allowMismatchedFilename: true)
             }
         } catch {
             showError("Could not import the saved mask values: \(error.localizedDescription)")
         }
+    }
+
+    @discardableResult
+    func importStashedMaskValuesFile(
+        _ source: URL,
+        for file: URL,
+        allowMismatchedFilename: Bool = false
+    ) throws -> Int {
+        let data = try Data(contentsOf: source, options: .mappedIfSafe)
+        return try importStashedMaskValuesJSON(
+            data,
+            for: file,
+            allowMismatchedFilename: allowMismatchedFilename
+        )
     }
 
     func forgetRecentFile(_ url: URL) {

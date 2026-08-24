@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.2 - 2026-08-24
+
+- Fixes Import Values by removing the filename popover's modal presentation conflict and using a non-blocking JSON file chooser.
+- Keeps immediate full-filename hover text using an inline tooltip that does not interfere with Recent PDFs actions.
+- Adds a file-based JSON import round-trip regression test in addition to the existing decoder test.
+
 ## 1.4.1 - 2026-08-24
 
 - Replaces unreliable filename help tags with immediate full-filename hover popovers.

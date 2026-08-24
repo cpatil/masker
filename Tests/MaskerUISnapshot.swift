@@ -99,6 +99,17 @@ struct MaskerUISnapshot {
             model.exactValues == "JOE AND MARY FARMER\n444-55-6666",
             "Mask-value import did not restore the exact-value editor"
         )
+        let exportedFile = output.deletingLastPathComponent().appendingPathComponent("roundtrip-mask-values.json")
+        try exportedData.write(to: exportedFile, options: .atomic)
+        model.exactValues = ""
+        model.stashMaskValuesForLoadedFiles()
+        let fileImportedCount = try model.importStashedMaskValuesFile(exportedFile, for: input)
+        precondition(fileImportedCount == 2, "Mask-value file import did not restore two values")
+        precondition(
+            model.exactValues == "JOE AND MARY FARMER\n444-55-6666",
+            "Mask-value file import did not restore the exact-value editor"
+        )
+        try? FileManager.default.removeItem(at: exportedFile)
 
         var mismatchedObject = exportedValues ?? [:]
         mismatchedObject["pdfFileName"] = "different-document.pdf"
