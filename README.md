@@ -21,7 +21,7 @@ Read the short development story: [I vibe-coded a PDF redactor because I needed 
 - Opt-in institution account-suffix detection that keeps names such as `MERRILL LYNCH` and right-aligned table amounts visible.
 - Line-scoped exceptions for false positives such as `FORM 8879`.
 - Search-as-you-type with previous/next navigation and cached on-device OCR; selected masks are omitted from results.
-- A local Recent PDFs list that restores each PDF's saved exact mask values.
+- A local Recent PDFs list that restores each PDF's saved exact mask values and can export them as JSON.
 - Continuous-scroll review with matches synchronized to the visible page.
 - Permanent export that removes the original text layer, forms, annotations, attachments, scripts, layers, and metadata.
 

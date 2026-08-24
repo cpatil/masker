@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.1 - 2026-08-24
+
+- Makes the What to Mask panel compact and independently scrollable.
+- Adds JSON export for the mask values saved with each recent PDF.
+- Rejects pathological mask rectangles and caps raster memory to prevent damaged page rendering.
+
 ## 1.2.0 - 2026-08-24
 
 - Adds a persistent Recent PDFs list with quick reopening.

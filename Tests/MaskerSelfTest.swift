@@ -201,9 +201,16 @@ struct MaskerSelfTest {
         )
         try require(!boundaryMatches.contains(where: { $0.category.hasPrefix("SSN / ITIN compact") }), "Compact identifier matched inside a longer number")
 
+        let pathologicalRect = RedactionMatch(
+            fileURL: source,
+            pageIndex: 3,
+            category: "Synthetic invalid rectangle",
+            matchedText: "",
+            rects: [CGRect(x: 0, y: 0, width: 612, height: 500)]
+        )
         let created = try PDFMasker.exportSanitizedCopies(
             files: [source],
-            matches: matches,
+            matches: matches + [pathologicalRect],
             outputFolder: outputs,
             dpi: 180,
             progress: { _ in }

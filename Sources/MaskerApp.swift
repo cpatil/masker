@@ -21,6 +21,13 @@ struct MaskerApp: App {
 #endif
 
 final class MaskerModel: ObservableObject {
+    private struct MaskValuesExport: Encodable {
+        let format = "masker-mask-values"
+        let version = 1
+        let pdfFileName: String
+        let maskValues: [String]
+    }
+
     private static let recentPDFPathsKey = "recentPDFPaths"
     private static let maskValuesByPDFPathKey = "maskValuesByPDFPath"
     private static let maximumRecentPDFs = 10
@@ -128,6 +135,42 @@ final class MaskerModel: ObservableObject {
         return values.split(whereSeparator: \.isNewline).filter {
             !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }.count
+    }
+
+    func stashedMaskValuesJSON(for file: URL) throws -> Data {
+        let values = (storedMaskValues(for: file) ?? "")
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let payload = MaskValuesExport(pdfFileName: file.lastPathComponent, maskValues: values)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        return try encoder.encode(payload)
+    }
+
+    func exportStashedMaskValues(for file: URL) {
+        if files.contains(where: { $0.standardizedFileURL == file.standardizedFileURL }) {
+            stashMaskValuesForLoadedFiles()
+        }
+        guard stashedValueCount(for: file) > 0 else {
+            showError("There are no saved mask values for \(file.lastPathComponent).")
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.title = "Export Mask Values"
+        panel.prompt = "Export"
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = file.deletingPathExtension().lastPathComponent + "-mask-values.json"
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+
+        do {
+            try stashedMaskValuesJSON(for: file).write(to: destination, options: .atomic)
+            status = "Exported saved mask values to \(destination.lastPathComponent)."
+        } catch {
+            showError("Could not export the saved mask values: \(error.localizedDescription)")
+        }
     }
 
     func forgetRecentFile(_ url: URL) {
@@ -467,6 +510,14 @@ struct ContentView: View {
                                     .buttonStyle(.plain)
                                     .help(file.path)
 
+                                    Button("Export") {
+                                        model.exportStashedMaskValues(for: file)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .font(.caption)
+                                    .disabled(model.stashedValueCount(for: file) == 0)
+                                    .help("Export this PDF's saved mask values as JSON")
+
                                     Button {
                                         model.forgetRecentFile(file)
                                     } label: {
@@ -488,49 +539,53 @@ struct ContentView: View {
                 }
 
                 GroupBox("2. Choose what to mask") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Exact values - one per line")
-                            .font(.callout.weight(.medium))
-                        TextEditor(text: $model.exactValues)
-                            .font(.system(.body, design: .monospaced))
-                            .frame(minHeight: 105)
-                            .padding(5)
-                            .background(Color(nsColor: .textBackgroundColor))
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25)))
-                        Text("Examples: full name, street address, account number")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-
-                        Divider()
-                        Toggle("SSN / ITIN", isOn: $model.detectSSN)
-                        Toggle("Employer ID (EIN)", isOn: $model.detectEIN)
-                        Toggle("Email addresses", isOn: $model.detectEmail)
-                        Toggle("US phone numbers", isOn: $model.detectPhone)
-                        Toggle("Institution account suffixes", isOn: $model.detectAccountSuffixes)
-                        Text("Opt-in: masks only a trailing 3-8 digit identifier on institution-like lines. Names remain visible.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        if model.detectAccountSuffixes {
-                            Text("Never auto-mask lines containing - one per line")
-                                .font(.caption.weight(.medium))
-                            TextEditor(text: $model.accountSuffixExceptions)
-                                .font(.system(.caption, design: .monospaced))
-                                .frame(minHeight: 58)
-                                .padding(4)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Exact values - one per line")
+                                .font(.callout.weight(.medium))
+                            TextEditor(text: $model.exactValues)
+                                .font(.system(.body, design: .monospaced))
+                                .frame(minHeight: 90)
+                                .padding(5)
                                 .background(Color(nsColor: .textBackgroundColor))
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
                                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25)))
-                            Text("Example: FORM 8879. This exception applies only to the account-suffix detector.")
+                            Text("Examples: full name, street address, account number")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            Divider()
+                            Toggle("SSN / ITIN", isOn: $model.detectSSN)
+                            Toggle("Employer ID (EIN)", isOn: $model.detectEIN)
+                            Toggle("Email addresses", isOn: $model.detectEmail)
+                            Toggle("US phone numbers", isOn: $model.detectPhone)
+                            Toggle("Institution account suffixes", isOn: $model.detectAccountSuffixes)
+                            Text("Opt-in: masks only a trailing 3-8 digit identifier on institution-like lines. Names remain visible.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            if model.detectAccountSuffixes {
+                                Text("Never auto-mask lines containing - one per line")
+                                    .font(.caption.weight(.medium))
+                                TextEditor(text: $model.accountSuffixExceptions)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .frame(minHeight: 58)
+                                    .padding(4)
+                                    .background(Color(nsColor: .textBackgroundColor))
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25)))
+                                Text("Example: FORM 8879. This exception applies only to the account-suffix detector.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Toggle("First + last name variants", isOn: $model.generateNameVariants)
+                            Text("Opt-in: a value such as “JOE AND MARY FARMER” also searches for “JOE FARMER.” Review these matches carefully.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                        Toggle("First + last name variants", isOn: $model.generateNameVariants)
-                        Text("Opt-in: a value such as “JOE AND MARY FARMER” also searches for “JOE FARMER.” Review these matches carefully.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                        .padding(.top, 6)
+                        .padding(.trailing, 5)
                     }
-                    .padding(.top, 6)
+                    .frame(height: 310)
                 }
 
                 Button {
@@ -1090,7 +1145,7 @@ struct ContinuousPDFView: NSViewRepresentable {
         private func addRedactionAnnotations(_ matches: [RedactionMatch], to document: PDFDocument) {
             for match in matches {
                 guard let page = document.page(at: match.pageIndex) else { continue }
-                for displayRect in match.rects {
+                for displayRect in PDFMasker.safeRedactionRects(match.rects, on: page) {
                     let pageRect = pageRect(for: displayRect, on: page).insetBy(dx: -0.5, dy: -0.5)
                     let annotation = PDFAnnotation(bounds: pageRect, forType: .square, withProperties: nil)
                     annotation.color = .black

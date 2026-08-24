@@ -344,11 +344,12 @@ enum PDFMasker {
         let pageTransform = page.transform(for: .mediaBox)
         let transformedPageBounds = page.bounds(for: .mediaBox).applying(pageTransform).standardized
         let selections = lineSelections.isEmpty ? [selection] : lineSelections
-        let rects = selections.map { selectedLine -> CGRect in
+        let candidateRects = selections.map { selectedLine -> CGRect in
             let pageRect = selectedLine.bounds(for: page).insetBy(dx: -1.5, dy: -1.5)
             let transformed = pageRect.applying(pageTransform).standardized
             return transformed.offsetBy(dx: -transformedPageBounds.minX, dy: -transformedPageBounds.minY)
-        }.filter { !$0.isNull && $0.width > 0 && $0.height > 0 }
+        }
+        let rects = safeRedactionRects(candidateRects, on: page)
 
         guard !rects.isEmpty else { return nil }
         return RedactionMatch(
@@ -733,6 +734,26 @@ enum PDFMasker {
         return CGRect(origin: .zero, size: transformed.size)
     }
 
+    static func safeRedactionRects(_ rects: [CGRect], on page: PDFPage) -> [CGRect] {
+        let pageRect = displayBounds(for: page)
+        let maximumHeight = max(72, pageRect.height * 0.35)
+        let maximumArea = pageRect.width * pageRect.height * 0.16
+
+        return rects.compactMap { candidate in
+            guard candidate.origin.x.isFinite,
+                  candidate.origin.y.isFinite,
+                  candidate.width.isFinite,
+                  candidate.height.isFinite else { return nil }
+            let clipped = candidate.standardized.intersection(pageRect)
+            guard !clipped.isNull,
+                  clipped.width > 0,
+                  clipped.height > 0,
+                  clipped.height <= maximumHeight,
+                  clipped.width * clipped.height <= maximumArea else { return nil }
+            return clipped
+        }
+    }
+
     private static func renderPage(
         _ page: PDFPage,
         dpi: CGFloat,
@@ -743,8 +764,13 @@ enum PDFMasker {
         let pageTransform = page.transform(for: .mediaBox)
         let transformedBounds = pageBounds.applying(pageTransform).standardized
         let displaySize = transformedBounds.size
-        let pixelWidth = max(Int(ceil(displaySize.width * scale)), 1)
-        let pixelHeight = max(Int(ceil(displaySize.height * scale)), 1)
+        let requestedWidth = max(displaySize.width * scale, 1)
+        let requestedHeight = max(displaySize.height * scale, 1)
+        let maximumPixelCount: CGFloat = 20_000_000
+        let pixelReduction = min(1, sqrt(maximumPixelCount / (requestedWidth * requestedHeight)))
+        let renderScale = scale * pixelReduction
+        let pixelWidth = max(Int(ceil(displaySize.width * renderScale)), 1)
+        let pixelHeight = max(Int(ceil(displaySize.height * renderScale)), 1)
 
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
               let bitmap = CGContext(
@@ -757,7 +783,7 @@ enum PDFMasker {
                 bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
               ) else { return nil }
 
-        bitmap.scaleBy(x: scale, y: scale)
+        bitmap.scaleBy(x: renderScale, y: renderScale)
         bitmap.setFillColor(NSColor.white.cgColor)
         bitmap.fill(CGRect(origin: .zero, size: displaySize))
 
@@ -768,7 +794,7 @@ enum PDFMasker {
 
         if !redactionRects.isEmpty {
             bitmap.setFillColor(NSColor.black.cgColor)
-            for rect in redactionRects {
+            for rect in safeRedactionRects(redactionRects, on: page) {
                 bitmap.fill(rect.insetBy(dx: -0.75, dy: -0.75))
             }
         }

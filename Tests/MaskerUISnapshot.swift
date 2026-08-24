@@ -82,6 +82,13 @@ struct MaskerUISnapshot {
         hosting.layoutSubtreeIfNeeded()
         precondition(model.pdfSearchResultCount == 1, "Search should list only the unchecked Farmer result")
         precondition(model.stashedValueCount(for: input) == 2, "Recent PDF did not retain two mask values")
+        let exportedValues = try JSONSerialization.jsonObject(
+            with: model.stashedMaskValuesJSON(for: input)
+        ) as? [String: Any]
+        precondition(exportedValues?["format"] as? String == "masker-mask-values", "Mask-value export format is missing")
+        precondition(exportedValues?["pdfFileName"] as? String == input.lastPathComponent, "Mask-value export has the wrong PDF name")
+        precondition((exportedValues?["maskValues"] as? [String])?.count == 2, "Mask-value export did not include two values")
+        precondition(exportedValues?["pdfPath"] == nil, "Mask-value export must not disclose the local PDF path")
 
         var embeddedPDFView: PDFView?
         if let pdfView = findPDFView(in: hosting), let document = pdfView.document {
