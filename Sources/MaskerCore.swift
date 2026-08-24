@@ -64,6 +64,21 @@ enum MaskerError: LocalizedError {
 }
 
 enum PDFMasker {
+    private final class OCRPageCacheEntry: NSObject {
+        let observations: [VNRecognizedTextObservation]
+
+        init(observations: [VNRecognizedTextObservation]) {
+            self.observations = observations
+        }
+    }
+
+    private static let ocrPageCache: NSCache<NSString, OCRPageCacheEntry> = {
+        let cache = NSCache<NSString, OCRPageCacheEntry>()
+        cache.countLimit = 256
+        return cache
+    }()
+    private static let ocrCacheLock = NSLock()
+
     private struct PatternRule {
         let label: String
         let expression: String
@@ -79,15 +94,18 @@ enum PDFMasker {
         files: [URL],
         exactTerms: [String],
         options: PatternOptions,
+        shouldCancel: @escaping () -> Bool = { false },
         progress: @escaping (String) -> Void
     ) -> [RedactionMatch] {
         var allMatches: [RedactionMatch] = []
         let primaryRules = searchRules(for: exactTerms, options: options)
 
         for fileURL in files {
+            if shouldCancel() { break }
             guard let document = PDFDocument(url: fileURL) else { continue }
             var fileMatches: [RedactionMatch] = []
             for pageIndex in 0..<document.pageCount {
+                if shouldCancel() { break }
                 autoreleasepool {
                     progress("Scanning \(fileURL.lastPathComponent), page \(pageIndex + 1) of \(document.pageCount)")
                     guard let page = document.page(at: pageIndex) else { return }
@@ -100,7 +118,8 @@ enum PDFMasker {
                             fileURL: fileURL,
                             pageIndex: pageIndex,
                             searchRules: primaryRules,
-                            options: options
+                            options: options,
+                            shouldCancel: shouldCancel
                         )
                     } else {
                         pageMatches = scanTextPage(
@@ -117,8 +136,9 @@ enum PDFMasker {
             }
 
             let compactRules = compactIdentifierRules(from: fileMatches)
-            if !compactRules.isEmpty {
+            if !compactRules.isEmpty && !shouldCancel() {
                 for pageIndex in 0..<document.pageCount {
+                    if shouldCancel() { break }
                     autoreleasepool {
                         progress("Checking identifier variants in \(fileURL.lastPathComponent), page \(pageIndex + 1) of \(document.pageCount)")
                         guard let page = document.page(at: pageIndex) else { return }
@@ -130,7 +150,8 @@ enum PDFMasker {
                                 fileURL: fileURL,
                                 pageIndex: pageIndex,
                                 searchRules: compactRules,
-                                options: PatternOptions(detectSSN: false, detectEIN: false, detectEmail: false, detectPhone: false)
+                                options: PatternOptions(detectSSN: false, detectEIN: false, detectEmail: false, detectPhone: false),
+                                shouldCancel: shouldCancel
                             )
                         } else {
                             variantMatches = scanTextPage(
@@ -321,22 +342,17 @@ enum PDFMasker {
         fileURL: URL,
         pageIndex: Int,
         searchRules: [SearchRule],
-        options: PatternOptions
+        options: PatternOptions,
+        shouldCancel: @escaping () -> Bool
     ) -> [RedactionMatch] {
-        guard let image = renderPage(page, dpi: 180, redactionRects: []) else { return [] }
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = false
-        request.recognitionLanguages = ["en-US"]
-
-        do {
-            try VNImageRequestHandler(cgImage: image, orientation: .up).perform([request])
-        } catch {
-            return []
-        }
-
+        guard !shouldCancel(),
+              let observations = recognizedTextObservations(
+                page,
+                fileURL: fileURL,
+                pageIndex: pageIndex,
+                shouldCancel: shouldCancel
+              ) else { return [] }
         let displayRect = displayBounds(for: page)
-        let observations = request.results ?? []
         var matches: [RedactionMatch] = []
 
         for observation in observations {
@@ -398,6 +414,46 @@ enum PDFMasker {
             }
         }
         return matches
+    }
+
+    private static func recognizedTextObservations(
+        _ page: PDFPage,
+        fileURL: URL,
+        pageIndex: Int,
+        shouldCancel: () -> Bool
+    ) -> [VNRecognizedTextObservation]? {
+        let cacheKey = ocrCacheKey(fileURL: fileURL, pageIndex: pageIndex)
+        if let cached = ocrPageCache.object(forKey: cacheKey) {
+            return cached.observations
+        }
+
+        ocrCacheLock.lock()
+        defer { ocrCacheLock.unlock() }
+        if let cached = ocrPageCache.object(forKey: cacheKey) {
+            return cached.observations
+        }
+        guard !shouldCancel(),
+              let image = renderPage(page, dpi: 180, redactionRects: []) else { return nil }
+
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        request.recognitionLanguages = ["en-US"]
+        do {
+            try VNImageRequestHandler(cgImage: image, orientation: .up).perform([request])
+        } catch {
+            return nil
+        }
+        let observations = request.results ?? []
+        ocrPageCache.setObject(OCRPageCacheEntry(observations: observations), forKey: cacheKey)
+        return observations
+    }
+
+    private static func ocrCacheKey(fileURL: URL, pageIndex: Int) -> NSString {
+        let values = try? fileURL.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        let modified = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
+        let size = values?.fileSize ?? 0
+        return "\(fileURL.standardizedFileURL.path)|\(modified)|\(size)|\(pageIndex)" as NSString
     }
 
     private static func ocrMatch(

@@ -101,6 +101,38 @@ struct MaskerSelfTest {
         try require(!exceptionSuffixes.contains("7788"), "OCR account suffix exception was ignored")
         try require(exceptionSuffixes.contains("8891"), "An unrelated account suffix was incorrectly excluded")
 
+        let cachedSearchStarted = Date()
+        let cachedSearch = PDFMasker.scan(
+            files: [source],
+            exactTerms: ["FIDELITY"],
+            options: PatternOptions(
+                detectSSN: false,
+                detectEIN: false,
+                detectEmail: false,
+                detectPhone: false,
+                generateNameVariants: false
+            ),
+            progress: { _ in }
+        )
+        try require(cachedSearch.contains(where: { $0.matchedText == "FIDELITY" }), "Cached OCR search missed a result")
+        try require(-cachedSearchStarted.timeIntervalSinceNow < 2, "Cached OCR search was unexpectedly slow")
+
+        var cancellationRequested = false
+        let cancelledSearch = PDFMasker.scan(
+            files: [source],
+            exactTerms: ["MERRILL"],
+            options: PatternOptions(
+                detectSSN: false,
+                detectEIN: false,
+                detectEmail: false,
+                detectPhone: false,
+                generateNameVariants: false
+            ),
+            shouldCancel: { cancellationRequested },
+            progress: { _ in cancellationRequested = true }
+        )
+        try require(cancelledSearch.isEmpty, "Cancelled search continued scanning later pages")
+
         let noNameVariants = PDFMasker.scan(
             files: [source],
             exactTerms: ["JOE AND MARY FARMER"],

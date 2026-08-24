@@ -43,6 +43,7 @@ final class MaskerModel: ObservableObject {
     @Published var pdfSearchResultCount = 0
     @Published var pdfSearchResultIndex = 0
     @Published var pdfSearchIsBusy = false
+    @Published var pdfSearchProgress = ""
     @Published var searchNavigationToken = 0
     @Published var searchNavigationDirection = 1
 
@@ -181,6 +182,7 @@ final class MaskerModel: ObservableObject {
         pdfSearchResultCount = 0
         pdfSearchResultIndex = 0
         pdfSearchIsBusy = false
+        pdfSearchProgress = ""
     }
 
     func navigateSearch(_ direction: Int) {
@@ -485,6 +487,13 @@ struct ContentView: View {
                 if model.pdfSearchIsBusy {
                     ProgressView()
                         .controlSize(.small)
+                    if !model.pdfSearchProgress.isEmpty {
+                        Text(model.pdfSearchProgress)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize()
+                    }
                 } else if model.pdfSearchResultCount > 0 {
                     Text("\(model.pdfSearchResultIndex + 1) of \(model.pdfSearchResultCount)")
                         .font(.caption.monospacedDigit())
@@ -528,6 +537,7 @@ struct ContentView: View {
                         searchResultCount: $model.pdfSearchResultCount,
                         searchResultIndex: $model.pdfSearchResultIndex,
                         searchIsBusy: $model.pdfSearchIsBusy,
+                        searchProgress: $model.pdfSearchProgress,
                         navigationToken: model.searchNavigationToken,
                         navigationDirection: model.searchNavigationDirection
                     )
@@ -645,6 +655,7 @@ struct ContinuousPDFView: NSViewRepresentable {
     @Binding var searchResultCount: Int
     @Binding var searchResultIndex: Int
     @Binding var searchIsBusy: Bool
+    @Binding var searchProgress: String
     let navigationToken: Int
     let navigationDirection: Int
 
@@ -680,6 +691,23 @@ struct ContinuousPDFView: NSViewRepresentable {
     }
 
     final class Coordinator {
+        private final class SearchCancellation {
+            private let lock = NSLock()
+            private var cancelled = false
+
+            var isCancelled: Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                return cancelled
+            }
+
+            func cancel() {
+                lock.lock()
+                cancelled = true
+                lock.unlock()
+            }
+        }
+
         var parent: ContinuousPDFView
         private weak var pdfView: PDFView?
         private var pageObserver: NSObjectProtocol?
@@ -687,6 +715,8 @@ struct ContinuousPDFView: NSViewRepresentable {
         private var loadedFilePath = ""
         private var lastSearchText = ""
         private var searchWorkItem: DispatchWorkItem?
+        private var searchCancellation: SearchCancellation?
+        private var searchGeneration = 0
         private var searchResults: [RedactionMatch] = []
         private var searchAnnotations: [(PDFPage, PDFAnnotation)] = []
         private var currentSearchIndex = 0
@@ -709,6 +739,7 @@ struct ContinuousPDFView: NSViewRepresentable {
 
         func detach() {
             searchWorkItem?.cancel()
+            searchCancellation?.cancel()
             if let pageObserver { NotificationCenter.default.removeObserver(pageObserver) }
             pageObserver = nil
         }
@@ -722,6 +753,9 @@ struct ContinuousPDFView: NSViewRepresentable {
             let signature = filePath + "|" + matchPart
 
             if signature != documentSignature {
+                searchWorkItem?.cancel()
+                searchCancellation?.cancel()
+                searchGeneration += 1
                 let visiblePage = pdfView.currentPage.flatMap { pdfView.document?.index(for: $0) }
                 let targetPage = loadedFilePath == filePath ? (visiblePage ?? requestedPage) : requestedPage
                 guard let data = try? Data(contentsOf: fileURL), let document = PDFDocument(data: data) else { return }
@@ -753,11 +787,15 @@ struct ContinuousPDFView: NSViewRepresentable {
             guard normalized != lastSearchText else { return }
             lastSearchText = normalized
             searchWorkItem?.cancel()
+            searchCancellation?.cancel()
+            searchGeneration += 1
+            let generation = searchGeneration
 
             guard !normalized.isEmpty else {
                 searchResults = []
                 currentSearchIndex = 0
                 clearSearchAnnotations()
+                parent.searchProgress = ""
                 publishSearchState(isBusy: false)
                 return
             }
@@ -765,9 +803,12 @@ struct ContinuousPDFView: NSViewRepresentable {
             searchResults = []
             currentSearchIndex = 0
             clearSearchAnnotations()
+            parent.searchProgress = "Preparing..."
             publishSearchState(isBusy: true)
+            let cancellation = SearchCancellation()
+            searchCancellation = cancellation
             let work = DispatchWorkItem { [weak self] in
-                self?.performSearch(normalized)
+                self?.performSearch(normalized, generation: generation, cancellation: cancellation)
             }
             searchWorkItem = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
@@ -781,8 +822,14 @@ struct ContinuousPDFView: NSViewRepresentable {
             showCurrentSearchResult()
         }
 
-        private func performSearch(_ query: String) {
-            guard query == lastSearchText else { return }
+        private func performSearch(
+            _ query: String,
+            generation: Int,
+            cancellation: SearchCancellation
+        ) {
+            guard query == lastSearchText,
+                  generation == searchGeneration,
+                  !cancellation.isCancelled else { return }
             let fileURL = parent.fileURL
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let found = PDFMasker.scan(
@@ -795,15 +842,32 @@ struct ContinuousPDFView: NSViewRepresentable {
                         detectPhone: false,
                         generateNameVariants: false
                     ),
-                    progress: { _ in }
+                    shouldCancel: { cancellation.isCancelled },
+                    progress: { message in
+                        let label: String
+                        if let pageRange = message.range(of: ", page ") {
+                            label = "Page " + message[pageRange.upperBound...]
+                        } else {
+                            label = "Searching..."
+                        }
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self,
+                                  generation == self.searchGeneration,
+                                  !cancellation.isCancelled else { return }
+                            self.parent.searchProgress = label
+                        }
+                    }
                 )
                 DispatchQueue.main.async {
                     guard let self,
+                          generation == self.searchGeneration,
+                          !cancellation.isCancelled,
                           query == self.lastSearchText,
                           fileURL.standardizedFileURL.path == self.loadedFilePath else { return }
                     self.searchResults = found
                     self.currentSearchIndex = 0
                     self.installSearchAnnotations()
+                    self.parent.searchProgress = ""
                     self.publishSearchState(isBusy: false)
                     if !found.isEmpty { self.showCurrentSearchResult() }
                 }
