@@ -693,18 +693,22 @@ struct ContentView: View {
                                     }
                                     .buttonStyle(.plain)
 
-                                    Button("Import Values") {
+                                    Button {
                                         model.importStashedMaskValues(for: file)
+                                    } label: {
+                                        Label("Import", systemImage: "square.and.arrow.down")
                                     }
-                                    .buttonStyle(.plain)
-                                    .font(.caption)
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
                                     .help("Restore mask values from a Masker JSON file")
 
-                                    Button("Export Values") {
+                                    Button {
                                         model.exportStashedMaskValues(for: file)
+                                    } label: {
+                                        Label("Export", systemImage: "square.and.arrow.up")
                                     }
-                                    .buttonStyle(.plain)
-                                    .font(.caption)
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
                                     .disabled(model.stashedValueCount(for: file) == 0)
                                     .help("Export this PDF's saved mask values as JSON")
 

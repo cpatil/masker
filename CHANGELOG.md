@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.3 - 2026-08-24
+
+- Makes the Recent PDFs import and export actions compact, bordered buttons with icons instead of plain text links.
+
 ## 1.4.2 - 2026-08-24
 
 - Fixes Import Values by removing the filename popover's modal presentation conflict and using a non-blocking JSON file chooser.
