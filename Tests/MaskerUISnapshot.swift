@@ -51,6 +51,7 @@ struct MaskerUISnapshot {
         model.generateNameVariants = true
         model.detectAccountSuffixes = true
         model.replaceWithLabels = true
+        model.revealMaskedTextOnHover = true
         model.accountSuffixExceptions = "FORM 8879"
         var reviewMatches = matches
         if let index = reviewMatches.firstIndex(where: {

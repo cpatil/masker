@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.1 - 2026-08-24
+
+- Replaces unreliable filename help tags with immediate full-filename hover popovers.
+- Adds an optional preview-only mode that reveals a mask under the pointer with a yellow highlight; exports remain permanently sanitized.
+- Clarifies that Preview can OCR visible pixels even though Masker removes the PDF text layer, and adds an OCR residual test for labeled exports.
+
 ## 1.4.0 - 2026-08-24
 
 - Adds an opt-in export mode that replaces black masks with generic labels such as `<Acct 1>` and `<Name 1>`.

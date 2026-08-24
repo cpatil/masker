@@ -64,12 +64,13 @@ Masker never overwrites an original. Output names end in `_masked.pdf`; if that 
 
 Each exported page is rebuilt from sanitized pixels at 300 DPI using Core Graphics. The original PDF objects are not copied into the output. Replacement labels, when enabled, are drawn only after the original pixels are removed. Masker then reopens the result, verifies that active content is gone, and compares the coarse visual structure of every page with the expected masked source before reporting success.
 
-This intentionally makes the sanitized PDF non-searchable and non-editable. It also increases file size compared with object-level redaction.
+This intentionally removes the searchable and editable text layer. Preview and other apps may still use OCR to search text that remains visibly rendered on the page; masked values are removed from those pixels. Rasterization also increases file size compared with object-level redaction.
 
 ## Privacy and limitations
 
 - Processing is local. Image-only pages use Apple's on-device Vision OCR.
 - Nothing in the app uploads documents, extracted text, or search terms.
+- Preview may make visible pixels searchable with on-device OCR even though the PDF contains no text layer. A masked value itself should not appear in those OCR results.
 - Recent file paths and their exact mask values are stored in local macOS preferences and can be cleared from the app.
 - OCR and pattern matching can miss handwriting, unusual typography, separated digits, or poor scans.
 - Automatic detectors can produce false positives. Review every selected match and every output page before sharing.

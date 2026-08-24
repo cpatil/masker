@@ -20,6 +20,29 @@ struct MaskerApp: App {
 }
 #endif
 
+private struct FilenameHoverPopover: ViewModifier {
+    let filename: String
+    @State private var isHovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .onHover { isHovering = $0 }
+            .popover(isPresented: $isHovering, arrowEdge: .bottom) {
+                Text(filename)
+                    .font(.callout)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+            }
+    }
+}
+
+private extension View {
+    func fullFilenameOnHover(_ filename: String) -> some View {
+        modifier(FilenameHoverPopover(filename: filename))
+    }
+}
+
 final class MaskerModel: ObservableObject {
     private struct MaskValuesExport: Codable {
         let format: String
@@ -65,6 +88,7 @@ final class MaskerModel: ObservableObject {
     @Published var detectAccountSuffixes = false
     @Published var accountSuffixExceptions = ""
     @Published var replaceWithLabels = false
+    @Published var revealMaskedTextOnHover = false
     @Published var matches: [RedactionMatch] = []
     @Published var selectedMatchID: UUID?
     @Published var activeFileURL: URL?
@@ -581,7 +605,7 @@ struct ContentView: View {
                                 Text(file.lastPathComponent)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
-                                    .help(file.lastPathComponent)
+                                    .fullFilenameOnHover(file.lastPathComponent)
                                 Spacer()
                                 Button {
                                     model.removeFile(file)
@@ -625,7 +649,7 @@ struct ContentView: View {
                                                 Text(file.lastPathComponent)
                                                     .lineLimit(1)
                                                     .truncationMode(.middle)
-                                                    .help(file.lastPathComponent)
+                                                    .fullFilenameOnHover(file.lastPathComponent)
                                                 let count = model.stashedValueCount(for: file)
                                                 Text("\(count) saved mask value\(count == 1 ? "" : "s")")
                                                     .font(.caption2)
@@ -720,6 +744,10 @@ struct ContentView: View {
                             Text("Exports readable placeholders such as <Acct 1> and <Name 1>. Repeated values reuse a label; different account identifiers get different numbers.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                            Toggle("Reveal masked text on hover", isOn: $model.revealMaskedTextOnHover)
+                            Text("Preview only: temporarily shows the original text with a yellow highlight. Sanitized exports remain masked.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         .padding(.top, 6)
                         .padding(.trailing, 5)
@@ -774,7 +802,7 @@ struct ContentView: View {
                             .lineLimit(1)
                     }
                     .frame(maxWidth: 280)
-                    .help(activeFile.lastPathComponent)
+                    .fullFilenameOnHover(activeFile.lastPathComponent)
                 }
             }
             .padding(14)
@@ -907,6 +935,7 @@ struct ContentView: View {
                         fileURL: activeFile,
                         matches: model.matches.filter { $0.fileURL.standardizedFileURL == activeFile.standardizedFileURL },
                         replaceWithLabels: model.replaceWithLabels,
+                        revealMaskedTextOnHover: model.revealMaskedTextOnHover,
                         currentPage: $model.currentPreviewPage,
                         searchText: model.pdfSearchText,
                         searchResultCount: $model.pdfSearchResultCount,
@@ -1026,6 +1055,7 @@ struct ContinuousPDFView: NSViewRepresentable {
     let fileURL: URL
     let matches: [RedactionMatch]
     let replaceWithLabels: Bool
+    let revealMaskedTextOnHover: Bool
     @Binding var currentPage: Int
     let searchText: String
     @Binding var searchResultCount: Int
@@ -1059,6 +1089,7 @@ struct ContinuousPDFView: NSViewRepresentable {
             replaceWithLabels: replaceWithLabels,
             requestedPage: currentPage
         )
+        context.coordinator.updateRevealMaskedTextOnHover(revealMaskedTextOnHover)
         context.coordinator.updateSearchIfNeeded(searchText)
         context.coordinator.navigateIfNeeded(token: navigationToken, direction: navigationDirection)
     }
@@ -1067,7 +1098,7 @@ struct ContinuousPDFView: NSViewRepresentable {
         coordinator.detach()
     }
 
-    final class Coordinator {
+    final class Coordinator: NSObject {
         private final class SearchCancellation {
             private let lock = NSLock()
             private var cancelled = false
@@ -1085,9 +1116,19 @@ struct ContinuousPDFView: NSViewRepresentable {
             }
         }
 
+        private struct PreviewMaskGroup {
+            let page: PDFPage
+            let hitRects: [CGRect]
+            let annotations: [PDFAnnotation]
+        }
+
         var parent: ContinuousPDFView
         private weak var pdfView: PDFView?
         private var pageObserver: NSObjectProtocol?
+        private var trackingArea: NSTrackingArea?
+        private var previewMasks: [UUID: PreviewMaskGroup] = [:]
+        private var hoveredMatchID: UUID?
+        private var hoverAnnotations: [(PDFPage, PDFAnnotation)] = []
         private var documentSignature = ""
         private var loadedFilePath = ""
         private var lastSearchText = ""
@@ -1101,10 +1142,19 @@ struct ContinuousPDFView: NSViewRepresentable {
 
         init(parent: ContinuousPDFView) {
             self.parent = parent
+            super.init()
         }
 
         func attach(to pdfView: PDFView) {
             self.pdfView = pdfView
+            let trackingArea = NSTrackingArea(
+                rect: .zero,
+                options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+                owner: self,
+                userInfo: nil
+            )
+            pdfView.addTrackingArea(trackingArea)
+            self.trackingArea = trackingArea
             pageObserver = NotificationCenter.default.addObserver(
                 forName: .PDFViewPageChanged,
                 object: pdfView,
@@ -1115,8 +1165,11 @@ struct ContinuousPDFView: NSViewRepresentable {
         }
 
         func detach() {
+            restoreHoveredMask()
             searchWorkItem?.cancel()
             searchCancellation?.cancel()
+            if let trackingArea, let pdfView { pdfView.removeTrackingArea(trackingArea) }
+            trackingArea = nil
             if let pageObserver { NotificationCenter.default.removeObserver(pageObserver) }
             pageObserver = nil
         }
@@ -1135,6 +1188,8 @@ struct ContinuousPDFView: NSViewRepresentable {
             let signature = filePath + "|labels=\(replaceWithLabels ? 1 : 0)|" + matchPart
 
             if signature != documentSignature {
+                restoreHoveredMask()
+                previewMasks = [:]
                 searchWorkItem?.cancel()
                 searchCancellation?.cancel()
                 searchGeneration += 1
@@ -1167,6 +1222,43 @@ struct ContinuousPDFView: NSViewRepresentable {
                       requestedPage < document.pageCount {
                 goToPage(requestedPage)
             }
+        }
+
+        func updateRevealMaskedTextOnHover(_ enabled: Bool) {
+            pdfView?.window?.acceptsMouseMovedEvents = enabled
+            if !enabled { restoreHoveredMask() }
+        }
+
+        @objc func mouseMoved(with event: NSEvent) {
+            guard parent.revealMaskedTextOnHover,
+                  let pdfView,
+                  let document = pdfView.document else {
+                restoreHoveredMask()
+                return
+            }
+            let viewPoint = pdfView.convert(event.locationInWindow, from: nil)
+            guard let page = pdfView.page(for: viewPoint, nearest: false) else {
+                restoreHoveredMask()
+                return
+            }
+            let pagePoint = pdfView.convert(viewPoint, to: page)
+            let candidates = previewMasks.filter { _, group in
+                group.page === page && group.hitRects.contains(where: { $0.contains(pagePoint) })
+            }
+            let matchID = candidates.min { lhs, rhs in
+                let leftArea = lhs.value.hitRects.map { $0.width * $0.height }.min() ?? .greatestFiniteMagnitude
+                let rightArea = rhs.value.hitRects.map { $0.width * $0.height }.min() ?? .greatestFiniteMagnitude
+                return leftArea < rightArea
+            }?.key
+            guard let matchID else {
+                restoreHoveredMask()
+                return
+            }
+            revealMask(matchID, in: document)
+        }
+
+        @objc func mouseExited(with event: NSEvent) {
+            restoreHoveredMask()
         }
 
         func updateSearchIfNeeded(_ query: String) {
@@ -1311,8 +1403,11 @@ struct ContinuousPDFView: NSViewRepresentable {
             for match in matches {
                 guard let page = document.page(at: match.pageIndex) else { continue }
                 let safeRects = PDFMasker.safeRedactionRects(match.rects, on: page)
-                for displayRect in safeRects {
-                    let pageRect = pageRect(for: displayRect, on: page).insetBy(dx: -0.5, dy: -0.5)
+                let pageRects = safeRects.map {
+                    pageRect(for: $0, on: page).insetBy(dx: -0.5, dy: -0.5)
+                }
+                var maskAnnotations: [PDFAnnotation] = []
+                for pageRect in pageRects {
                     let annotation = PDFAnnotation(bounds: pageRect, forType: .square, withProperties: nil)
                     annotation.color = replaceWithLabels ? .white : .black
                     annotation.interiorColor = replaceWithLabels ? .white : .black
@@ -1322,11 +1417,11 @@ struct ContinuousPDFView: NSViewRepresentable {
                     border.lineWidth = 0
                     annotation.border = border
                     page.addAnnotation(annotation)
+                    maskAnnotations.append(annotation)
                 }
                 if replaceWithLabels,
                    let label = labelsByMatchID[match.id],
-                   let displayRect = safeRects.first {
-                    let pageRect = pageRect(for: displayRect, on: page).insetBy(dx: -0.5, dy: -0.5)
+                   let pageRect = pageRects.first {
                     let annotation = PDFAnnotation(
                         bounds: pageRect,
                         forType: .freeText,
@@ -1344,8 +1439,55 @@ struct ContinuousPDFView: NSViewRepresentable {
                     border.lineWidth = 0
                     annotation.border = border
                     page.addAnnotation(annotation)
+                    maskAnnotations.append(annotation)
+                }
+                if !pageRects.isEmpty {
+                    previewMasks[match.id] = PreviewMaskGroup(
+                        page: page,
+                        hitRects: pageRects,
+                        annotations: maskAnnotations
+                    )
                 }
             }
+        }
+
+        private func revealMask(_ matchID: UUID, in document: PDFDocument) {
+            guard hoveredMatchID != matchID,
+                  let group = previewMasks[matchID],
+                  document.index(for: group.page) != NSNotFound else { return }
+            restoreHoveredMask()
+            for annotation in group.annotations { annotation.shouldDisplay = false }
+            var installed: [(PDFPage, PDFAnnotation)] = []
+            for rect in group.hitRects {
+                let highlight = PDFAnnotation(bounds: rect, forType: .square, withProperties: nil)
+                highlight.color = .systemOrange
+                highlight.interiorColor = NSColor.systemYellow.withAlphaComponent(0.22)
+                highlight.shouldDisplay = true
+                highlight.shouldPrint = false
+                let border = PDFBorder()
+                border.lineWidth = 1.5
+                highlight.border = border
+                group.page.addAnnotation(highlight)
+                installed.append((group.page, highlight))
+            }
+            hoveredMatchID = matchID
+            hoverAnnotations = installed
+            pdfView?.annotationsChanged(on: group.page)
+            pdfView?.needsDisplay = true
+        }
+
+        private func restoreHoveredMask() {
+            if let hoveredMatchID, let group = previewMasks[hoveredMatchID] {
+                for annotation in group.annotations { annotation.shouldDisplay = true }
+                pdfView?.annotationsChanged(on: group.page)
+            }
+            for (page, annotation) in hoverAnnotations {
+                page.removeAnnotation(annotation)
+                pdfView?.annotationsChanged(on: page)
+            }
+            hoveredMatchID = nil
+            hoverAnnotations = []
+            pdfView?.needsDisplay = true
         }
 
         private func replacementFont(for label: String, in rect: CGRect) -> NSFont {

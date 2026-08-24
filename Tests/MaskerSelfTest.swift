@@ -263,6 +263,27 @@ struct MaskerSelfTest {
             (0..<labeledOutput.pageCount).allSatisfy { labeledOutput.page(at: $0)?.annotations.isEmpty == true },
             "Labeled output still has live annotations"
         )
+        let labeledResidual = PDFMasker.scan(
+            files: labeled,
+            exactTerms: [
+                "Example Person", fullFarmerName, joeFarmerVariant,
+                "123-45-6789", "123456789", "444-55-6666", "555-66-7777",
+                "98-7654321", "987654321", "alpha@example.com", "(415) 555-0198"
+            ] + expectedSuffixes,
+            options: PatternOptions(
+                detectSSN: true,
+                detectEIN: true,
+                detectEmail: true,
+                detectPhone: true,
+                generateNameVariants: true,
+                detectAccountSuffixes: true
+            ),
+            progress: { _ in }
+        )
+        try require(
+            labeledResidual.isEmpty,
+            "OCR found original sensitive text in the labeled output: \(labeledResidual.map(\.matchedText))"
+        )
         for (pageIndex, filename) in [(0, "labeled-name-preview.png"), (3, "labeled-account-preview.png")] {
             if let labeledPreview = PDFMasker.previewImage(
                 fileURL: source,
@@ -327,7 +348,7 @@ struct MaskerSelfTest {
 
         report("PASS source=\(source.path)")
         report("PASS output=\(created[0].path)")
-        report("PASS matches=\(matches.count) residual=\(residual.count)")
+        report("PASS matches=\(matches.count) residual=\(residual.count) labeledResidual=\(labeledResidual.count)")
     }
 
     private static func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
