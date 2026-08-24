@@ -1,39 +1,92 @@
 # Masker
 
-Masker is a small, offline macOS app for permanently redacting repeated personal information from PDFs.
+**Offline, permanent PDF redaction for macOS.**
+
+Masker finds repeated personal information, lets you review every proposed mask in a continuous PDF view, and creates sanitized copies without uploading the document or its contents.
+
+![Masker reviewing a generated test PDF](docs/masker.png)
+
+## Why
+
+Preview's redaction tool is effective, but selecting every occurrence by hand is tedious. Masker automates the repetitive part while keeping the consequential decision - what gets removed - visible and reversible until export.
+
+Read the short development story: [I vibe-coded a PDF redactor because I needed one](docs/why-masker.md).
+
+## Features
+
+- Exact-value matching across one or more PDFs.
+- SSN/ITIN, EIN, email, and US phone detection.
+- Compact nine-digit variants when a formatted SSN/ITIN or EIN is found.
+- Opt-in first-and-last name variants: `JOE AND MARY FARMER` can also find `Joe Farmer`.
+- Opt-in institution account-suffix detection that keeps names such as `MERRILL LYNCH` visible.
+- Line-scoped exceptions for false positives such as `FORM 8879`.
+- Search-as-you-type with previous/next navigation and cached on-device OCR.
+- Continuous-scroll review with matches synchronized to the visible page.
+- Permanent export that removes the original text layer, forms, annotations, attachments, scripts, layers, and metadata.
+
+## Try it
+
+Download the universal macOS build from the [latest release](https://github.com/cpatil/masker/releases/latest), unzip it, and open `Masker.app`. It includes native Apple Silicon and Intel executables.
+
+The downloadable build is ad-hoc signed, not Apple-notarized. On first launch, macOS may require you to right-click the app and choose **Open**. You can also build it directly from source.
+
+### Build from source
+
+Requirements: macOS 13 or newer and Xcode Command Line Tools. Full Xcode and third-party dependencies are not required.
+
+```sh
+git clone https://github.com/cpatil/masker.git
+cd masker
+./build.sh
+open Masker.app
+```
+
+The build uses SwiftUI, PDFKit, Vision, Core Graphics, and Core Text from macOS.
+
+Maintainers can create the universal release archive with `./package-release.sh`.
 
 ## Use it
 
-1. Open `Masker.app`.
-2. Drop in one or more PDFs.
-3. Enter exact values to mask, one per line. Common SSN/ITIN and EIN patterns are enabled by default.
+1. Drop in one or more PDFs.
+2. Enter exact values to mask, one per line.
+3. Enable any additional detectors you want.
 4. Click **Scan PDFs Locally**.
-5. Scroll through the complete PDF. The match list follows the visible page; uncheck anything that should remain visible.
-6. Use the PDF search box to inspect other strings. **Add & Rescan** adds the search text to the exact-value list. OCR from image-only pages is reused after the initial scan, replaced searches are cancelled, and uncached OCR reports its page progress.
+5. Scroll through the PDF and uncheck anything that should remain visible.
+6. Search for possible variants; use **Add & Rescan** when you find another value to remove.
 7. Click **Create Sanitized Copies**.
-
-The app never uploads documents or values. Image-only pages are processed with Apple's on-device Vision OCR.
-
-When a formatted SSN/ITIN or EIN is detected, Masker also searches that document for the same nine digits without separators. Digit boundaries prevent matches inside longer numbers.
-
-**Institution account suffixes** is opt-in. It detects institution-like lines ending in a 3-8 digit identifier and masks only those trailing digits, leaving the institution name visible. It rejects common form, line, page, amount, and tax-year patterns; standalone values from 1900 through 2099 are always treated as years. Every match should still be reviewed.
-
-Use **Never auto-mask lines containing** for line-specific exceptions such as `FORM 8879`. Exceptions suppress only automatic account-suffix matches, so they do not globally exempt the same digits when they appear on a legitimate institution line. Deselecting a review match changes only that occurrence.
-
-**First + last name variants** is opt-in. For an exact value such as `JOE AND MARY FARMER`, it also searches for `JOE FARMER`. This is intentionally not enabled by default because shortened names can produce false positives.
-
-## Safety model
-
-The exported PDF is rebuilt from sanitized page pixels at 300 DPI. This permanently removes the original PDF's text layer, form fields, annotations, attachments, layers, scripts, and metadata. The resulting PDF is intentionally not searchable or editable.
 
 Masker never overwrites an original. Output names end in `_masked.pdf`; if that name exists, a number is added.
 
-Always review every page before sharing. OCR and pattern matching can miss unusual typography, handwriting, separated digits, or low-quality scans.
+## What "permanent" means
 
-## Rebuild
+Each exported page is rebuilt from sanitized pixels at 300 DPI. The original PDF objects are not copied into the output. Masker then reopens and validates the result before reporting success.
 
-Run `./build.sh` on macOS 13 or newer. Xcode Command Line Tools are required; there are no third-party dependencies.
+This intentionally makes the sanitized PDF non-searchable and non-editable. It also increases file size compared with object-level redaction.
 
-Run `./test.sh` to exercise both searchable-text and image-only OCR redaction, then verify that the sensitive values cannot be recovered from the sanitized output.
+## Privacy and limitations
 
-For a private local fixture corpus, run `./private-smoke-test.sh /path/to/folder`. It reports only aggregate counts, creates its temporary sanitized copy outside the project, and removes that copy after validation.
+- Processing is local. Image-only pages use Apple's on-device Vision OCR.
+- Nothing in the app uploads documents, extracted text, or search terms.
+- OCR and pattern matching can miss handwriting, unusual typography, separated digits, or poor scans.
+- Automatic detectors can produce false positives. Review every selected match and every output page before sharing.
+- Masker is a privacy tool, not a guarantee of regulatory compliance.
+
+## Tests
+
+```sh
+./test.sh
+```
+
+The self-test generates its own searchable, scanned, and rotated PDFs. It covers the `JOE AND MARY FARMER` to `Joe Farmer` name variant, identifier variants, institution suffixes, exceptions, cached OCR search, permanent export, and residual-text checks. No tax documents or private fixtures are stored in this repository.
+
+An optional local-only corpus test is also available:
+
+```sh
+./private-smoke-test.sh /path/to/private/pdf/folder
+```
+
+It reports aggregate counts, creates its temporary output outside the repository, and removes that output after validation.
+
+## License
+
+[MIT](LICENSE)

@@ -12,6 +12,8 @@ struct MaskerSelfTest {
     }
 
     static func main() throws {
+        let fullFarmerName = "JOE AND MARY FARMER"
+        let joeFarmerVariant = "JOE FARMER"
         let root = URL(fileURLWithPath: CommandLine.arguments.dropFirst().first ?? "/tmp/masker-self-test", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let source = root.appendingPathComponent("sample-tax-document.pdf")
@@ -43,7 +45,7 @@ struct MaskerSelfTest {
 
         let matches = PDFMasker.scan(
             files: [source],
-            exactTerms: ["Example Person", "JOE AND MARY FARMER", "444-55-6666", "555-66-7777"],
+            exactTerms: ["Example Person", fullFarmerName, "444-55-6666", "555-66-7777"],
             options: PatternOptions(detectSSN: true, detectEIN: true, detectEmail: true, detectPhone: true, generateNameVariants: true, detectAccountSuffixes: true),
             progress: { _ in }
         )
@@ -65,7 +67,10 @@ struct MaskerSelfTest {
         try require(!scannedSSNs.isEmpty, "Failed to detect the image-only SSN using OCR")
         try require(!rotatedSSNs.isEmpty, "Failed to detect the rotated-page SSN")
         try require(matches.contains(where: { $0.matchedText.caseInsensitiveCompare("Example Person") == .orderedSame }), "Failed to detect exact name")
-        try require(matches.contains(where: { $0.matchedText == "JOE FARMER" && $0.category == "Name variant" }), "Failed to detect first + last name variant")
+        let joeFarmerMatches = matches.filter {
+            $0.matchedText.uppercased() == joeFarmerVariant && $0.category == "Name variant"
+        }
+        try require(joeFarmerMatches.count == 1, "Joe Farmer variant should be detected exactly once, case-insensitively")
         try require(matches.filter({ $0.matchedText == "123456789" && $0.category.hasPrefix("SSN / ITIN compact") }).count == 1, "Failed compact SSN detection")
         try require(matches.contains(where: { $0.matchedText == "987654321" && $0.category.hasPrefix("EIN compact") }), "Failed to detect compact EIN variant")
         try require(matches.contains(where: { $0.matchedText == "98-7654321" }), "Failed to detect EIN")
@@ -76,6 +81,10 @@ struct MaskerSelfTest {
             .map(\.matchedText)
         let expectedSuffixes = ["3436", "8891", "5077", "2396", "21807", "2759", "4985", "7788"]
         try require(Set(accountSuffixes) == Set(expectedSuffixes), "Account suffix detection mismatch: \(accountSuffixes)")
+        try require(
+            accountSuffixes.filter { $0 == "2759" }.count == 2,
+            "CHARLES SCHWAB 2759 STC should be detected in addition to VANGUARD #2759"
+        )
         try require(
             !accountSuffixes.contains("1040") && !accountSuffixes.contains("2025") && !accountSuffixes.contains("8879"),
             "Form number or tax year was mistaken for an account suffix"
@@ -135,11 +144,14 @@ struct MaskerSelfTest {
 
         let noNameVariants = PDFMasker.scan(
             files: [source],
-            exactTerms: ["JOE AND MARY FARMER"],
+            exactTerms: [fullFarmerName],
             options: PatternOptions(detectSSN: false, detectEIN: false, detectEmail: false, detectPhone: false, generateNameVariants: false),
             progress: { _ in }
         )
-        try require(!noNameVariants.contains(where: { $0.matchedText == "JOE FARMER" }), "Name variants should be opt-in")
+        try require(
+            !noNameVariants.contains(where: { $0.matchedText.uppercased() == joeFarmerVariant }),
+            "Joe Farmer should not be detected when name variants are disabled"
+        )
 
         let boundaryMatches = PDFMasker.scan(
             files: [boundarySource],
@@ -164,7 +176,7 @@ struct MaskerSelfTest {
 
         let residual = PDFMasker.scan(
             files: created,
-            exactTerms: ["Example Person", "JOE AND MARY FARMER", "JOE FARMER", "123-45-6789", "123456789", "444-55-6666", "555-66-7777", "98-7654321", "987654321", "alpha@example.com", "(415) 555-0198"] + expectedSuffixes,
+            exactTerms: ["Example Person", fullFarmerName, joeFarmerVariant, "123-45-6789", "123456789", "444-55-6666", "555-66-7777", "98-7654321", "987654321", "alpha@example.com", "(415) 555-0198"] + expectedSuffixes,
             options: PatternOptions(detectSSN: true, detectEIN: true, detectEmail: true, detectPhone: true, generateNameVariants: true, detectAccountSuffixes: true),
             progress: { _ in }
         )
@@ -202,7 +214,7 @@ struct MaskerSelfTest {
         pdf.beginPDFPage(nil)
         pdf.setFillColor(NSColor.white.cgColor)
         pdf.fill(mediaBox)
-        drawText("Taxpayer: Example Person\nOwners: JOE AND MARY FARMER\nShort form: JOE FARMER\nSSN: 123-45-6789\nSSN copy: 123456789\nEIN: 98-7654321\nEIN copy: 987654321\nEmail: alpha@example.com\nPhone: (415) 555-0198", in: pdf, at: CGPoint(x: 72, y: 700))
+        drawText("Taxpayer: Example Person\nOwners: JOE AND MARY FARMER\nShort form: Joe Farmer\nSSN: 123-45-6789\nSSN copy: 123456789\nEIN: 98-7654321\nEIN copy: 987654321\nEmail: alpha@example.com\nPhone: (415) 555-0198", in: pdf, at: CGPoint(x: 72, y: 700))
         pdf.endPDFPage()
 
         pdf.beginPDFPage(nil)
@@ -222,7 +234,7 @@ struct MaskerSelfTest {
         pdf.beginPDFPage(nil)
         pdf.setFillColor(NSColor.white.cgColor)
         pdf.fill(mediaBox)
-        drawText("ALLY BANK 3436\nCHARLES SCHWAB & CO., INC -8891\nCHARLES SCHWAB 5077\nMERRILL LYNCH - 2396\nMERRILL LYNCH 21807\nVANGUARD #2759\nWEALTHFRONT - 4985\nBLACKSTONE PRIVATE CREDIT FUND\nVANGUARD #2025\nFORM 1040\nINTERNAL REVENUE SERVICE FORM 8879\nTAX YEAR 2025", in: pdf, at: CGPoint(x: 72, y: 700))
+        drawText("ALLY BANK 3436\nCHARLES SCHWAB & CO., INC -8891\nCHARLES SCHWAB 5077\nMERRILL LYNCH - 2396\nMERRILL LYNCH 21807\nVANGUARD #2759\nWEALTHFRONT - 4985\nCHARLES SCHWAB 2759 STC\nBLACKSTONE PRIVATE CREDIT FUND\nVANGUARD #2025\nFORM 1040\nINTERNAL REVENUE SERVICE FORM 8879\nTAX YEAR 2025", in: pdf, at: CGPoint(x: 72, y: 700))
         pdf.endPDFPage()
         pdf.closePDF()
 

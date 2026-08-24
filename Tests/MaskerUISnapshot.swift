@@ -29,7 +29,7 @@ struct MaskerUISnapshot {
         let model = MaskerModel()
         model.files = [input]
         model.activeFileURL = input
-        model.outputFolder = input.deletingLastPathComponent().appendingPathComponent("Masked PDFs")
+        model.outputFolder = URL(fileURLWithPath: "/Users/example/Documents/Masked PDFs", isDirectory: true)
         model.exactValues = "JOE AND MARY FARMER\n444-55-6666"
         model.detectEmail = true
         model.detectPhone = true

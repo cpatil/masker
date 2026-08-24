@@ -1,0 +1,22 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build universal release
+        run: ./package-release.sh
+      - name: Verify app bundle
+        run: |
+          codesign --verify --deep --strict Masker.app
+          plutil -lint Masker.app/Contents/Info.plist
+          lipo -archs Masker.app/Contents/MacOS/Masker
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Masker-macOS-universal
+          path: .build/release/Masker-*-macOS-universal.zip

@@ -561,7 +561,8 @@ enum PDFMasker {
     }
 
     private static let accountSuffixRegex = try! NSRegularExpression(
-        pattern: #"(?m)^([^\r\n]*?)([0-9]{3,8})[ \t_-]*$"#
+        pattern: #"(?m)^([^\r\n]*?)([0-9]{3,8})(?:[ \t]+(?:STC|LTC))?[ \t_-]*$"#,
+        options: [.caseInsensitive]
     )
 
     private static func isInstitutionLikeAccountPrefix(
