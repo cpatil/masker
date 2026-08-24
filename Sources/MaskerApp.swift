@@ -218,6 +218,13 @@ struct ContentView: View {
         _model = StateObject(wrappedValue: model)
     }
 
+    private var displayedVersion: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "dev"
+        let build = info?["CFBundleVersion"] as? String
+        return build.map { "v\(version) (\($0))" } ?? "v\(version)"
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -248,8 +255,16 @@ struct ContentView: View {
                 .font(.system(size: 27, weight: .semibold))
                 .foregroundStyle(.blue)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Masker")
-                    .font(.title2.weight(.semibold))
+                HStack(spacing: 8) {
+                    Text("Masker")
+                        .font(.title2.weight(.semibold))
+                    Text(displayedVersion)
+                        .font(.caption.monospacedDigit().weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Color.secondary.opacity(0.12), in: Capsule())
+                }
                 Text("Permanent, local PDF redaction")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)

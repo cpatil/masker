@@ -505,17 +505,29 @@ enum PDFMasker {
     ) -> [RedactionMatch] {
         let nsText = text as NSString
         let fullRange = NSRange(location: 0, length: nsText.length)
-        return accountSuffixRegex.matches(in: text, range: fullRange).compactMap { result in
-            let prefixRange = result.range(at: 1)
-            let suffixRange = result.range(at: 2)
-            guard prefixRange.location != NSNotFound,
-                  suffixRange.location != NSNotFound,
-                  isInstitutionLikeAccountPrefix(
-                    nsText.substring(with: prefixRange),
-                    suffix: nsText.substring(with: suffixRange),
-                    line: nsText.substring(with: result.range),
-                    exceptions: exceptions
-                  ) else { return nil }
+        let pageBounds = page.bounds(for: .mediaBox)
+        return nativeAccountCandidateRegex.matches(in: text, range: fullRange).compactMap { result in
+            let suffixRange = result.range(at: 1)
+            guard suffixRange.location != NSNotFound,
+                  let suffixSelection = page.selection(for: suffixRange) else { return nil }
+            let suffix = nsText.substring(with: suffixRange)
+            let suffixBounds = suffixSelection.bounds(for: page)
+            let lineBand = CGRect(
+                x: pageBounds.minX,
+                y: suffixBounds.minY - 2,
+                width: pageBounds.width,
+                height: suffixBounds.height + 4
+            )
+            guard let bandSelection = page.selection(for: lineBand) else { return nil }
+            let nearbyBounds = suffixBounds.insetBy(dx: -2, dy: -2)
+            let physicalLine = bandSelection.selectionsByLine().first { selection in
+                let lineText = selection.string ?? ""
+                return selection.bounds(for: page).intersects(nearbyBounds) &&
+                    lineText.range(of: suffix, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+            }
+            guard let line = physicalLine?.string,
+                  let detectedSuffix = accountSuffixRange(in: line, exceptions: exceptions),
+                  (line as NSString).substring(with: detectedSuffix) == suffix else { return nil }
             return nativeMatch(
                 page: page,
                 range: suffixRange,
@@ -526,6 +538,10 @@ enum PDFMasker {
             )
         }
     }
+
+    private static let nativeAccountCandidateRegex = try! NSRegularExpression(
+        pattern: #"(?<![0-9])([0-9]{3,8})(?![0-9])"#
+    )
 
     private static func accountSuffixRange(in line: String, exceptions: [String]) -> NSRange? {
         let nsLine = line as NSString
