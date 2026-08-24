@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.2 - 2026-08-24
+
+- Adds an always-visible Recents button and an expandable per-PDF list.
+- Places an explicit Export Values action beside each recent PDF; it exports only that PDF's saved mask-value JSON.
+
 ## 1.2.1 - 2026-08-24
 
 - Makes the What to Mask panel compact and independently scrollable.

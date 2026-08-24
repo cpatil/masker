@@ -358,6 +358,7 @@ final class MaskerModel: ObservableObject {
 struct ContentView: View {
     @StateObject private var model = MaskerModel()
     @State private var isDropTargeted = false
+    @State private var recentPDFsExpanded = true
 
     init(model: MaskerModel = MaskerModel()) {
         _model = StateObject(wrappedValue: model)
@@ -447,7 +448,15 @@ struct ContentView: View {
                                     .foregroundStyle(.secondary)
                                 Text("Drop PDFs here")
                                     .font(.headline)
-                                Button("Choose PDFs...") { choosePDFs() }
+                                HStack(spacing: 8) {
+                                    Button("Choose PDFs...") { choosePDFs() }
+                                    Button {
+                                        withAnimation { recentPDFsExpanded.toggle() }
+                                    } label: {
+                                        Label("Recents", systemImage: "clock")
+                                    }
+                                    .help("Open a recent PDF or export its saved mask values")
+                                }
                             }
                         }
                         .frame(height: 120)
@@ -474,7 +483,7 @@ struct ContentView: View {
                             .font(.callout)
                         }
 
-                        if !model.recentFiles.isEmpty {
+                        if recentPDFsExpanded {
                             Divider()
                             HStack {
                                 Text("Recent PDFs")
@@ -484,6 +493,13 @@ struct ContentView: View {
                                 Button("Clear") { model.clearRecentFiles() }
                                     .buttonStyle(.plain)
                                     .font(.caption)
+                                    .disabled(model.recentFiles.isEmpty)
+                            }
+
+                            if model.recentFiles.isEmpty {
+                                Text("No recent PDFs yet.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             }
 
                             ForEach(model.recentFiles.prefix(6), id: \.path) { file in
@@ -510,7 +526,7 @@ struct ContentView: View {
                                     .buttonStyle(.plain)
                                     .help(file.path)
 
-                                    Button("Export") {
+                                    Button("Export Values") {
                                         model.exportStashedMaskValues(for: file)
                                     }
                                     .buttonStyle(.plain)
