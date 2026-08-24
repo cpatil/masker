@@ -584,7 +584,7 @@ enum PDFMasker {
     }
 
     private static let accountSuffixRegex = try! NSRegularExpression(
-        pattern: #"(?m)^([^\r\n]*?)([0-9]{3,8})(?:[ \t]+(?:STC|LTC))?[ \t_-]*$"#,
+        pattern: #"(?m)^([^\r\n]*?)([0-9]{3,8})(?:[ \t]+(?:STC|LTC))?(?:(?:[ \t_-]*$)|(?:[ \t]*\.{2,}[ \t]*(?:\$[ \t]*)?[0-9][0-9,]*(?:\.[0-9]+)?\.?[ \t]*$))"#,
         options: [.caseInsensitive]
     )
 
@@ -622,7 +622,8 @@ enum PDFMasker {
 
         let hasLowercase = trimmed.unicodeScalars.contains { CharacterSet.lowercaseLetters.contains($0) }
         let isAllCaps = !hasLowercase
-        guard explicitSeparator || (isAllCaps && words.count >= 2) else { return false }
+        let hasDottedLeader = line.contains("..")
+        guard explicitSeparator || (isAllCaps && (words.count >= 2 || hasDottedLeader)) else { return false }
 
         if let numericSuffix = Int(suffix),
            suffix.count == 4,

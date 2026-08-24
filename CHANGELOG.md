@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.2 - 2026-08-24
+
+- Detects institution account suffixes before dotted leaders and right-aligned amounts.
+- Keeps the institution name and table amount visible while masking only the account identifier.
+
 ## 1.1.1 - 2026-08-24
 
 - Incremental search now omits occurrences already covered by selected masks.

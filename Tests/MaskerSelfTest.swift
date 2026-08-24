@@ -79,14 +79,15 @@ struct MaskerSelfTest {
         let accountSuffixes = matches
             .filter { $0.category.hasPrefix("Account suffix") }
             .map(\.matchedText)
-        let expectedSuffixes = ["3436", "8891", "5077", "2396", "21807", "2759", "4985", "7788"]
+        let expectedSuffixes = ["3436", "8891", "5077", "2396", "21807", "2759", "4985", "0684", "9550", "0421", "7788"]
         try require(Set(accountSuffixes) == Set(expectedSuffixes), "Account suffix detection mismatch: \(accountSuffixes)")
         try require(
             accountSuffixes.filter { $0 == "2759" }.count == 2,
             "CHARLES SCHWAB 2759 STC should be detected in addition to VANGUARD #2759"
         )
         try require(
-            !accountSuffixes.contains("1040") && !accountSuffixes.contains("2025") && !accountSuffixes.contains("8879"),
+            !accountSuffixes.contains("1040") && !accountSuffixes.contains("2025") &&
+                !accountSuffixes.contains("8879") && !accountSuffixes.contains("777"),
             "Form number or tax year was mistaken for an account suffix"
         )
 
@@ -223,13 +224,24 @@ struct MaskerSelfTest {
 
         let preservedInstitutions = PDFMasker.scan(
             files: created,
-            exactTerms: ["ALLY BANK", "CHARLES SCHWAB", "MERRILL LYNCH", "VANGUARD", "WEALTHFRONT", "FIDELITY"],
+            exactTerms: ["ALLY BANK", "CHARLES SCHWAB", "MERRILL LYNCH", "VANGUARD", "WEALTHFRONT", "NORTHSTAR", "FIDELITY"],
             options: PatternOptions(detectSSN: false, detectEIN: false, detectEmail: false, detectPhone: false),
             progress: { _ in }
         )
         let preservedNames = Set(preservedInstitutions.map { $0.matchedText.uppercased() })
-        for institution in ["ALLY BANK", "CHARLES SCHWAB", "MERRILL LYNCH", "VANGUARD", "WEALTHFRONT", "FIDELITY"] {
+        for institution in ["ALLY BANK", "CHARLES SCHWAB", "MERRILL LYNCH", "VANGUARD", "WEALTHFRONT", "NORTHSTAR", "FIDELITY"] {
             try require(preservedNames.contains(institution), "Institution name was not preserved: \(institution)")
+        }
+
+        let preservedAmounts = PDFMasker.scan(
+            files: created,
+            exactTerms: ["4,277", "431", "88", "129", "254"],
+            options: PatternOptions(detectSSN: false, detectEIN: false, detectEmail: false, detectPhone: false),
+            progress: { _ in }
+        )
+        let preservedAmountValues = Set(preservedAmounts.map(\.matchedText))
+        for amount in ["4,277", "431", "88", "129", "254"] {
+            try require(preservedAmountValues.contains(amount), "Table amount was not preserved: \(amount)")
         }
 
         report("PASS source=\(source.path)")
@@ -273,7 +285,7 @@ struct MaskerSelfTest {
         pdf.beginPDFPage(nil)
         pdf.setFillColor(NSColor.white.cgColor)
         pdf.fill(mediaBox)
-        drawText("ALLY BANK 3436\nCHARLES SCHWAB & CO., INC -8891\nCHARLES SCHWAB 5077\nMERRILL LYNCH - 2396\nMERRILL LYNCH 21807\nVANGUARD #2759\nWEALTHFRONT - 4985\nCHARLES SCHWAB 2759 STC\nBLACKSTONE PRIVATE CREDIT FUND\nVANGUARD #2025\nFORM 1040\nINTERNAL REVENUE SERVICE FORM 8879\nTAX YEAR 2025", in: pdf, at: CGPoint(x: 72, y: 700))
+        drawText("ALLY BANK 3436\nCHARLES SCHWAB & CO., INC -8891\nCHARLES SCHWAB 5077\nMERRILL LYNCH - 2396\nMERRILL LYNCH 21807\nVANGUARD #2759\nWEALTHFRONT - 4985\nCHARLES SCHWAB 2759 STC\nALLY BANK 0684.......... $ 4,277.\nMERRILL LYNCH - 9550.......... 431.\nNORTHSTAR 0421.......... 88.\nTOTAL 777.......... 88.\nHDFC BANK IN INDIA.......... 129.\nIDBI.......... 254.\nBLACKSTONE PRIVATE CREDIT FUND\nVANGUARD #2025\nFORM 1040\nINTERNAL REVENUE SERVICE FORM 8879\nTAX YEAR 2025", in: pdf, at: CGPoint(x: 72, y: 740), fontSize: 16, frameHeight: 500)
         pdf.endPDFPage()
         pdf.closePDF()
 
@@ -295,14 +307,20 @@ struct MaskerSelfTest {
         pdf.closePDF()
     }
 
-    private static func drawText(_ text: String, in context: CGContext, at point: CGPoint) {
+    private static func drawText(
+        _ text: String,
+        in context: CGContext,
+        at point: CGPoint,
+        fontSize: CGFloat = 20,
+        frameHeight: CGFloat = 300
+    ) {
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 20),
+            .font: NSFont.systemFont(ofSize: fontSize),
             .foregroundColor: NSColor.black
         ]
         let attributed = NSAttributedString(string: text, attributes: attributes)
         let framesetter = CTFramesetterCreateWithAttributedString(attributed)
-        let path = CGPath(rect: CGRect(x: point.x, y: point.y - 300, width: 470, height: 300), transform: nil)
+        let path = CGPath(rect: CGRect(x: point.x, y: point.y - frameHeight, width: 470, height: frameHeight), transform: nil)
         let frame = CTFramesetterCreateFrame(framesetter, CFRange(), path, nil)
         CTFrameDraw(frame, context)
     }

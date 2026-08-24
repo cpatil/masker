@@ -18,7 +18,7 @@ Read the short development story: [I vibe-coded a PDF redactor because I needed 
 - SSN/ITIN, EIN, email, and US phone detection.
 - Compact nine-digit variants when a formatted SSN/ITIN or EIN is found.
 - Opt-in first-and-last name variants: `JOE AND MARY FARMER` can also find `Joe Farmer`.
-- Opt-in institution account-suffix detection that keeps names such as `MERRILL LYNCH` visible.
+- Opt-in institution account-suffix detection that keeps names such as `MERRILL LYNCH` and right-aligned table amounts visible.
 - Line-scoped exceptions for false positives such as `FORM 8879`.
 - Search-as-you-type with previous/next navigation and cached on-device OCR; selected masks are omitted from results.
 - Continuous-scroll review with matches synchronized to the visible page.
