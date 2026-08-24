@@ -28,6 +28,7 @@ final class MaskerModel: ObservableObject {
     @Published var detectPhone = false
     @Published var generateNameVariants = false
     @Published var detectAccountSuffixes = false
+    @Published var accountSuffixExceptions = ""
     @Published var matches: [RedactionMatch] = []
     @Published var selectedMatchID: UUID?
     @Published var activeFileURL: URL?
@@ -86,7 +87,11 @@ final class MaskerModel: ObservableObject {
             detectEmail: detectEmail,
             detectPhone: detectPhone,
             generateNameVariants: generateNameVariants,
-            detectAccountSuffixes: detectAccountSuffixes
+            detectAccountSuffixes: detectAccountSuffixes,
+            accountSuffixExceptions: accountSuffixExceptions
+                .split(whereSeparator: \.isNewline)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
         )
         let inputFiles = files
         let previouslyActiveFile = activeFileURL
@@ -331,6 +336,20 @@ struct ContentView: View {
                         Text("Opt-in: masks only a trailing 3-8 digit identifier on institution-like lines. Names remain visible.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        if model.detectAccountSuffixes {
+                            Text("Never auto-mask lines containing - one per line")
+                                .font(.caption.weight(.medium))
+                            TextEditor(text: $model.accountSuffixExceptions)
+                                .font(.system(.caption, design: .monospaced))
+                                .frame(minHeight: 58)
+                                .padding(4)
+                                .background(Color(nsColor: .textBackgroundColor))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25)))
+                            Text("Example: FORM 8879. This exception applies only to the account-suffix detector.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                         Toggle("First + last name variants", isOn: $model.generateNameVariants)
                         Text("Opt-in: a value such as “JOE AND MARY FARMER” also searches for “JOE FARMER.” Review these matches carefully.")
                             .font(.caption)

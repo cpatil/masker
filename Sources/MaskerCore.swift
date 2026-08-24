@@ -40,6 +40,7 @@ struct PatternOptions {
     var detectPhone = false
     var generateNameVariants = false
     var detectAccountSuffixes = false
+    var accountSuffixExceptions: [String] = []
 }
 
 enum MaskerError: LocalizedError {
@@ -279,7 +280,8 @@ enum PDFMasker {
                 page: page,
                 text: text,
                 fileURL: fileURL,
-                pageIndex: pageIndex
+                pageIndex: pageIndex,
+                exceptions: options.accountSuffixExceptions
             ))
         }
         return matches
@@ -382,7 +384,7 @@ enum PDFMasker {
             }
 
             if options.detectAccountSuffixes,
-               let suffix = accountSuffixRange(in: line),
+               let suffix = accountSuffixRange(in: line, exceptions: options.accountSuffixExceptions),
                let swiftRange = Range(suffix, in: line),
                let box = try? candidate.boundingBox(for: swiftRange) {
                 matches.append(ocrMatch(
@@ -442,7 +444,8 @@ enum PDFMasker {
         page: PDFPage,
         text: String,
         fileURL: URL,
-        pageIndex: Int
+        pageIndex: Int,
+        exceptions: [String]
     ) -> [RedactionMatch] {
         let nsText = text as NSString
         let fullRange = NSRange(location: 0, length: nsText.length)
@@ -453,7 +456,9 @@ enum PDFMasker {
                   suffixRange.location != NSNotFound,
                   isInstitutionLikeAccountPrefix(
                     nsText.substring(with: prefixRange),
-                    suffix: nsText.substring(with: suffixRange)
+                    suffix: nsText.substring(with: suffixRange),
+                    line: nsText.substring(with: result.range),
+                    exceptions: exceptions
                   ) else { return nil }
             return nativeMatch(
                 page: page,
@@ -466,7 +471,7 @@ enum PDFMasker {
         }
     }
 
-    private static func accountSuffixRange(in line: String) -> NSRange? {
+    private static func accountSuffixRange(in line: String, exceptions: [String]) -> NSRange? {
         let nsLine = line as NSString
         let fullRange = NSRange(location: 0, length: nsLine.length)
         guard let result = accountSuffixRegex.firstMatch(in: line, range: fullRange) else { return nil }
@@ -476,7 +481,9 @@ enum PDFMasker {
               suffixRange.location != NSNotFound,
               isInstitutionLikeAccountPrefix(
                 nsLine.substring(with: prefixRange),
-                suffix: nsLine.substring(with: suffixRange)
+                suffix: nsLine.substring(with: suffixRange),
+                line: line,
+                exceptions: exceptions
               ) else { return nil }
         return suffixRange
     }
@@ -485,7 +492,13 @@ enum PDFMasker {
         pattern: #"(?m)^([^\r\n]*?)([0-9]{3,8})[ \t_-]*$"#
     )
 
-    private static func isInstitutionLikeAccountPrefix(_ prefix: String, suffix: String) -> Bool {
+    private static func isInstitutionLikeAccountPrefix(
+        _ prefix: String,
+        suffix: String,
+        line: String,
+        exceptions: [String]
+    ) -> Bool {
+        guard !containsAccountSuffixException(line, exceptions: exceptions) else { return false }
         guard let rawLast = prefix.last,
               rawLast.isWhitespace || rawLast == "-" || rawLast == "#" else { return false }
 
@@ -508,7 +521,8 @@ enum PDFMasker {
             "AMOUNT", "BOX", "DATE", "FORM", "LINE", "NOTE", "PAGE", "PART",
             "SCHEDULE", "SECTION", "SUBTOTAL", "TAX", "TOTAL", "YEAR"
         ]
-        guard let firstWord = words.first?.uppercased(), !stopWords.contains(firstWord) else { return false }
+        let uppercaseWords = Set(words.map { $0.uppercased() })
+        guard uppercaseWords.isDisjoint(with: stopWords) else { return false }
 
         let hasLowercase = trimmed.unicodeScalars.contains { CharacterSet.lowercaseLetters.contains($0) }
         let isAllCaps = !hasLowercase
@@ -520,6 +534,21 @@ enum PDFMasker {
             return false
         }
         return true
+    }
+
+    private static func containsAccountSuffixException(_ line: String, exceptions: [String]) -> Bool {
+        let normalizedLine = normalizedAccountLine(line)
+        return exceptions.contains { exception in
+            let normalizedException = normalizedAccountLine(exception)
+            return !normalizedException.isEmpty && normalizedLine.contains(normalizedException)
+        }
+    }
+
+    private static func normalizedAccountLine(_ text: String) -> String {
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+            .uppercased()
     }
 
     private static func searchRules(for exactTerms: [String], options: PatternOptions) -> [SearchRule] {

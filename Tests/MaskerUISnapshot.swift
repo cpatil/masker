@@ -35,6 +35,7 @@ struct MaskerUISnapshot {
         model.detectPhone = true
         model.generateNameVariants = true
         model.detectAccountSuffixes = true
+        model.accountSuffixExceptions = "FORM 8879"
         model.matches = matches
         model.status = "Found \(matches.count) matches. Review the checked items before exporting."
         model.pdfSearchText = "FARMER"

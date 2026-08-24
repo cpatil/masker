@@ -76,7 +76,30 @@ struct MaskerSelfTest {
             .map(\.matchedText)
         let expectedSuffixes = ["3436", "8891", "5077", "2396", "21807", "2759", "4985", "7788"]
         try require(Set(accountSuffixes) == Set(expectedSuffixes), "Account suffix detection mismatch: \(accountSuffixes)")
-        try require(!accountSuffixes.contains("1040") && !accountSuffixes.contains("2025"), "Form number or tax year was mistaken for an account suffix")
+        try require(
+            !accountSuffixes.contains("1040") && !accountSuffixes.contains("2025") && !accountSuffixes.contains("8879"),
+            "Form number or tax year was mistaken for an account suffix"
+        )
+
+        let exceptionMatches = PDFMasker.scan(
+            files: [source],
+            exactTerms: [],
+            options: PatternOptions(
+                detectSSN: false,
+                detectEIN: false,
+                detectEmail: false,
+                detectPhone: false,
+                detectAccountSuffixes: true,
+                accountSuffixExceptions: ["ally   bank 3436", "FIDELITY - 7788"]
+            ),
+            progress: { _ in }
+        )
+        let exceptionSuffixes = exceptionMatches
+            .filter { $0.category.hasPrefix("Account suffix") }
+            .map(\.matchedText)
+        try require(!exceptionSuffixes.contains("3436"), "Native-text account suffix exception was ignored")
+        try require(!exceptionSuffixes.contains("7788"), "OCR account suffix exception was ignored")
+        try require(exceptionSuffixes.contains("8891"), "An unrelated account suffix was incorrectly excluded")
 
         let noNameVariants = PDFMasker.scan(
             files: [source],
@@ -167,7 +190,7 @@ struct MaskerSelfTest {
         pdf.beginPDFPage(nil)
         pdf.setFillColor(NSColor.white.cgColor)
         pdf.fill(mediaBox)
-        drawText("ALLY BANK 3436\nCHARLES SCHWAB & CO., INC -8891\nCHARLES SCHWAB 5077\nMERRILL LYNCH - 2396\nMERRILL LYNCH 21807\nVANGUARD #2759\nWEALTHFRONT - 4985\nBLACKSTONE PRIVATE CREDIT FUND\nVANGUARD #2025\nFORM 1040\nTAX YEAR 2025", in: pdf, at: CGPoint(x: 72, y: 700))
+        drawText("ALLY BANK 3436\nCHARLES SCHWAB & CO., INC -8891\nCHARLES SCHWAB 5077\nMERRILL LYNCH - 2396\nMERRILL LYNCH 21807\nVANGUARD #2759\nWEALTHFRONT - 4985\nBLACKSTONE PRIVATE CREDIT FUND\nVANGUARD #2025\nFORM 1040\nINTERNAL REVENUE SERVICE FORM 8879\nTAX YEAR 2025", in: pdf, at: CGPoint(x: 72, y: 700))
         pdf.endPDFPage()
         pdf.closePDF()
 
