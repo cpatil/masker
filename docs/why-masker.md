@@ -1,4 +1,4 @@
-# I built a local PDF redactor because Preview made me click too much
+# Redact away
 
 I needed to share a folder of financial documents with a tax strategist. They needed the financial picture—the institutions, holdings, transactions, and amounts—but not the personally identifiable information (PII) threaded through every document.
 
