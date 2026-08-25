@@ -1,4 +1,4 @@
-# Redact away
+# Nothing Personal: I built a local PDF redactor
 
 I needed to share a folder of financial documents with a tax strategist. They needed the financial picture—the institutions, holdings, transactions, and amounts—but not the personally identifiable information (PII) threaded through every document.
 
