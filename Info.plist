@@ -17,9 +17,20 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.6.1</string>
+    <string>1.7.0</string>
     <key>CFBundleVersion</key>
-    <string>25</string>
+    <string>26</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>local.masker.private-batch</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>masker</string>
+            </array>
+        </dict>
+    </array>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.utilities</string>
     <key>LSMinimumSystemVersion</key>

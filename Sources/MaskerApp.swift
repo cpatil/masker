@@ -58,15 +58,6 @@ private extension View {
 }
 
 final class MaskerModel: ObservableObject {
-    private struct MaskValueEntry: Codable, Equatable {
-        var value: String
-        var replaceWith: String
-        var fontName: String? = nil
-        var fontSize: Double? = nil
-        var widthPercent: Double? = nil
-        var justification: String? = nil
-    }
-
     private struct MaskValuesExportV2: Codable {
         let format: String
         let version: Int
@@ -145,6 +136,11 @@ final class MaskerModel: ObservableObject {
     @Published var pdfSearchProgress = ""
     @Published var searchNavigationToken = 0
     @Published var searchNavigationDirection = 1
+    @Published private(set) var privateBatchSession: PrivateBatchSession?
+
+    private var lastScannedBatchDocumentID: String?
+    private var lastScannedBatchMaskSetVersion: Int?
+    private var publicStatusRevision = 0
 
     var selectedCount: Int { matches.filter(\.isSelected).count }
 
@@ -158,6 +154,451 @@ final class MaskerModel: ObservableObject {
                     FileManager.default.fileExists(atPath: $0.path)
             }
         persistRecentFiles()
+        privateBatchSession = try? PrivateBatchStore.load()
+        publishPrivateBatchStatus(userActionRequired: privateBatchSession == nil ? nil : "open_or_review_document")
+    }
+
+    var privateBatchActiveDocumentIndex: Int? {
+        guard let session = privateBatchSession,
+              let activeID = session.activeDocumentID else { return nil }
+        return session.documents.firstIndex(where: { $0.id == activeID })
+    }
+
+    var privateBatchReviewedCount: Int {
+        guard let session = privateBatchSession else { return 0 }
+        return session.documents.filter { documentIsReviewed($0, in: session) }.count
+    }
+
+    var privateBatchCurrentIsReviewed: Bool {
+        guard let session = privateBatchSession,
+              let document = activePrivateBatchDocument(in: session) else { return false }
+        return documentIsReviewed(document, in: session)
+    }
+
+    var privateBatchCurrentIsScanned: Bool {
+        guard let session = privateBatchSession,
+              let activeID = session.activeDocumentID else { return false }
+        return lastScannedBatchDocumentID == activeID &&
+            lastScannedBatchMaskSetVersion == session.maskSetVersion
+    }
+
+    var isPrivateBatchDocumentLoaded: Bool {
+        guard let session = privateBatchSession,
+              let document = activePrivateBatchDocument(in: session) else { return false }
+        return activeFileURL?.standardizedFileURL.path == document.path
+    }
+
+    func beginPrivateBatchSelection() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a Private PDF Folder"
+        panel.prompt = "Create Private Batch"
+        panel.message = "Masker reads PDFs locally. Codex receives only opaque document IDs and counts."
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = false
+        panel.allowsMultipleSelection = false
+        publishPrivateBatchStatus(userActionRequired: "choose_folder_in_masker")
+        panel.begin { [weak self] response in
+            guard let self else { return }
+            guard response == .OK, let folder = panel.url else {
+                self.publishPrivateBatchStatus(userActionRequired: "choose_folder_in_masker")
+                return
+            }
+            self.startPrivateBatch(in: folder)
+        }
+    }
+
+    func startPrivateBatch(in folder: URL) {
+        do {
+            let documents = try PrivateBatchStore.documents(in: folder.standardizedFileURL)
+            let session = PrivateBatchSession.create(folder: folder, documents: documents)
+            try PrivateBatchStore.save(session)
+            privateBatchSession = nil
+            exactValues = ""
+            replacementEntriesByKey = [:]
+            applyPrivateBatchSettings(session.settings)
+            privateBatchSession = session
+            try openPrivateBatchDocument(session.activeDocumentID ?? documents[0].id)
+            status = "Created a private batch with \(documents.count) PDF\(documents.count == 1 ? "" : "s")."
+            publishPrivateBatchStatus(userActionRequired: "scan_and_review_current_document")
+        } catch {
+            showError(error.localizedDescription)
+            publishPrivateBatchStatus(userActionRequired: "choose_folder_in_masker")
+        }
+    }
+
+    func resumePrivateBatch() {
+        do {
+            let savedSession = try PrivateBatchStore.load()
+            guard let session = privateBatchSession ?? savedSession,
+                  let documentID = session.activeDocumentID ?? session.documents.first?.id else {
+                beginPrivateBatchSelection()
+                return
+            }
+            privateBatchSession = session
+            try openPrivateBatchDocument(documentID)
+        } catch {
+            showError(error.localizedDescription)
+            publishPrivateBatchStatus(userActionRequired: "resolve_error_in_masker")
+        }
+    }
+
+    func handleControlURL(_ url: URL) {
+        guard url.scheme == "masker", url.host == "private-batch" else {
+            addFiles([url])
+            return
+        }
+        let command = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let documentID = components?.queryItems?.first(where: { $0.name == "document" })?.value
+        switch command {
+        case "new":
+            beginPrivateBatchSelection()
+        case "resume":
+            resumePrivateBatch()
+        case "open":
+            guard let documentID else {
+                publishPrivateBatchStatus(userActionRequired: "resolve_error_in_masker")
+                return
+            }
+            if let session = privateBatchSession,
+               session.activeDocumentID != documentID,
+               isPrivateBatchDocumentLoaded,
+               !privateBatchCurrentIsReviewed {
+                showError("Mark the current document reviewed before opening another private-batch document.")
+                publishPrivateBatchStatus(userActionRequired: "mark_current_document_reviewed")
+                return
+            }
+            do {
+                try openPrivateBatchDocument(documentID)
+                publishPrivateBatchStatus(userActionRequired: "scan_and_review_current_document")
+            } catch {
+                showError(error.localizedDescription)
+                publishPrivateBatchStatus(userActionRequired: "resolve_error_in_masker")
+            }
+        case "scan":
+            scan()
+        case "review":
+            markCurrentPrivateBatchDocumentReviewed()
+        case "next":
+            openAdjacentPrivateBatchDocument(offset: 1)
+        case "previous":
+            openAdjacentPrivateBatchDocument(offset: -1)
+        case "begin-final":
+            beginPrivateBatchFinalPass()
+        case "export":
+            export()
+        default:
+            publishPrivateBatchStatus(userActionRequired: "resolve_error_in_masker")
+        }
+    }
+
+    func openPrivateBatchDocument(_ documentID: String) throws {
+        if let existing = privateBatchSession,
+           let loadedDocument = activePrivateBatchDocument(in: existing),
+           activeFileURL?.standardizedFileURL.path == loadedDocument.path {
+            savePrivateBatchState()
+        }
+        guard var session = privateBatchSession,
+              let index = session.documents.firstIndex(where: { $0.id == documentID }) else {
+            throw PrivateBatchStoreError.invalidSession
+        }
+        let url = try PrivateBatchStore.validate(session.documents[index])
+        session.activeDocumentID = documentID
+        try PrivateBatchStore.save(session)
+        privateBatchSession = session
+        files = [url]
+        activeFileURL = url
+        currentPreviewPage = 0
+        outputFolder = URL(fileURLWithPath: session.outputFolderPath, isDirectory: true)
+        exactValues = session.masks.map(\.value).joined(separator: "\n")
+        replacementEntriesByKey = Dictionary(uniqueKeysWithValues: session.masks.compactMap { entry in
+            let key = PDFMasker.normalizedReplacementKey(for: entry.value)
+            guard !key.isEmpty, !entry.replaceWith.isEmpty else { return nil }
+            return (key, entry)
+        })
+        applyPrivateBatchSettings(session.settings)
+        matches = []
+        selectedMatchID = nil
+        lastScannedBatchDocumentID = nil
+        lastScannedBatchMaskSetVersion = nil
+        status = "Opened \(url.lastPathComponent) from the private batch."
+        publishPrivateBatchStatus(userActionRequired: "scan_and_review_current_document")
+    }
+
+    func openAdjacentPrivateBatchDocument(offset: Int) {
+        guard let session = privateBatchSession,
+              let currentIndex = privateBatchActiveDocumentIndex else { return }
+        if offset > 0 && !privateBatchCurrentIsReviewed {
+            showError("Mark the current document reviewed before advancing.")
+            publishPrivateBatchStatus(userActionRequired: "mark_current_document_reviewed")
+            return
+        }
+        let nextIndex = currentIndex + offset
+        guard session.documents.indices.contains(nextIndex) else {
+            let action = session.phase == .discovery ? "begin_final_pass" : "export_or_finish_batch"
+            publishPrivateBatchStatus(userActionRequired: action)
+            return
+        }
+        do {
+            try openPrivateBatchDocument(session.documents[nextIndex].id)
+        } catch {
+            showError(error.localizedDescription)
+            publishPrivateBatchStatus(userActionRequired: "resolve_error_in_masker")
+        }
+    }
+
+    func markCurrentPrivateBatchDocumentReviewed() {
+        savePrivateBatchState()
+        guard var session = privateBatchSession,
+              let activeID = session.activeDocumentID,
+              let index = session.documents.firstIndex(where: { $0.id == activeID }) else { return }
+        guard privateBatchCurrentIsScanned else {
+            showError("Scan the current document with the current mask set before marking it reviewed.")
+            publishPrivateBatchStatus(userActionRequired: "scan_and_review_current_document")
+            return
+        }
+        session.documents[index].excludedMatchFingerprints = matches
+            .filter { !$0.isSelected && $0.fileURL.standardizedFileURL == activeFileURL?.standardizedFileURL }
+            .map(matchFingerprint)
+            .sorted()
+        if session.phase == .discovery {
+            session.documents[index].discoveryReviewedVersion = session.maskSetVersion
+        } else {
+            session.documents[index].finalReviewedVersion = session.maskSetVersion
+        }
+        do {
+            try PrivateBatchStore.save(session)
+            privateBatchSession = session
+            status = "Marked the current private-batch document reviewed."
+            let isLast = index == session.documents.count - 1
+            publishPrivateBatchStatus(
+                userActionRequired: isLast
+                    ? (session.phase == .discovery ? "begin_final_pass" : "export_or_finish_batch")
+                    : "open_next_document"
+            )
+        } catch {
+            showError(error.localizedDescription)
+            publishPrivateBatchStatus(userActionRequired: "resolve_error_in_masker")
+        }
+    }
+
+    func setOutputFolder(_ folder: URL) {
+        outputFolder = folder.standardizedFileURL
+        guard isPrivateBatchDocumentLoaded, var session = privateBatchSession else { return }
+        session.outputFolderPath = folder.standardizedFileURL.path
+        do {
+            try PrivateBatchStore.save(session)
+            privateBatchSession = session
+            publishPrivateBatchStatus(userActionRequired: "review_and_mark_current_document")
+        } catch {
+            showError("The private-batch output folder could not be saved.")
+            publishPrivateBatchStatus(userActionRequired: "resolve_error_in_masker")
+        }
+    }
+
+    func beginPrivateBatchFinalPass() {
+        savePrivateBatchState()
+        guard var session = privateBatchSession else { return }
+        guard session.documents.allSatisfy({ $0.discoveryReviewedVersion != nil }) else {
+            showError("Review every document at least once before beginning the final pass.")
+            publishPrivateBatchStatus(userActionRequired: "finish_discovery_review")
+            return
+        }
+        session.phase = .finalReview
+        for index in session.documents.indices {
+            session.documents[index].finalReviewedVersion = nil
+            session.documents[index].exportedVersion = nil
+        }
+        session.activeDocumentID = session.documents.first?.id
+        do {
+            try PrivateBatchStore.save(session)
+            privateBatchSession = session
+            if let firstID = session.activeDocumentID {
+                try openPrivateBatchDocument(firstID)
+            }
+            status = "Final pass started. Rescan, review, and export every document."
+            publishPrivateBatchStatus(userActionRequired: "scan_and_review_current_document")
+        } catch {
+            showError(error.localizedDescription)
+            publishPrivateBatchStatus(userActionRequired: "resolve_error_in_masker")
+        }
+    }
+
+    private func savePrivateBatchState() {
+        guard isPrivateBatchDocumentLoaded, var session = privateBatchSession else { return }
+        let masks = currentMaskEntries()
+        let settings = currentPrivateBatchSettings()
+        if masks != session.masks || settings != session.settings {
+            session.masks = masks
+            session.settings = settings
+            session.maskSetVersion += 1
+            lastScannedBatchDocumentID = nil
+            lastScannedBatchMaskSetVersion = nil
+        }
+        do {
+            try PrivateBatchStore.save(session)
+            privateBatchSession = session
+            publishPrivateBatchStatus(userActionRequired: "scan_and_review_current_document")
+        } catch {
+            status = "Could not save the private batch session."
+            publishPrivateBatchStatus(userActionRequired: "resolve_error_in_masker")
+        }
+    }
+
+    private func currentMaskEntries() -> [MaskValueEntry] {
+        let values = exactValues
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        var seen = Set<String>()
+        var entries = values.compactMap { value -> MaskValueEntry? in
+            let key = PDFMasker.normalizedReplacementKey(for: value)
+            guard !key.isEmpty, seen.insert(key).inserted else { return nil }
+            var entry = replacementEntriesByKey[key] ?? MaskValueEntry(value: value, replaceWith: "")
+            entry.value = value
+            return entry
+        }
+        entries.append(contentsOf: replacementEntriesByKey.values.filter {
+            seen.insert(PDFMasker.normalizedReplacementKey(for: $0.value)).inserted
+        })
+        return entries.sorted { $0.value.localizedCaseInsensitiveCompare($1.value) == .orderedAscending }
+    }
+
+    private func currentPrivateBatchSettings() -> PrivateBatchPatternSettings {
+        PrivateBatchPatternSettings(
+            detectSSN: detectSSN,
+            detectEIN: detectEIN,
+            detectEmail: detectEmail,
+            detectPhone: detectPhone,
+            generateNameVariants: generateNameVariants,
+            detectAccountSuffixes: detectAccountSuffixes,
+            accountSuffixExceptions: accountSuffixExceptions
+                .split(whereSeparator: \.isNewline)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        )
+    }
+
+    private func applyPrivateBatchSettings(_ settings: PrivateBatchPatternSettings) {
+        detectSSN = settings.detectSSN
+        detectEIN = settings.detectEIN
+        detectEmail = settings.detectEmail
+        detectPhone = settings.detectPhone
+        generateNameVariants = settings.generateNameVariants
+        detectAccountSuffixes = settings.detectAccountSuffixes
+        accountSuffixExceptions = settings.accountSuffixExceptions.joined(separator: "\n")
+    }
+
+    private func activePrivateBatchDocument(in session: PrivateBatchSession) -> PrivateBatchDocument? {
+        guard let activeID = session.activeDocumentID else { return nil }
+        return session.documents.first(where: { $0.id == activeID })
+    }
+
+    private func documentIsReviewed(_ document: PrivateBatchDocument, in session: PrivateBatchSession) -> Bool {
+        if session.phase == .discovery {
+            return document.discoveryReviewedVersion != nil
+        }
+        return document.finalReviewedVersion == session.maskSetVersion
+    }
+
+    private func matchFingerprint(_ match: RedactionMatch) -> String {
+        let rectangles = match.rects.map { rect in
+            [rect.minX, rect.minY, rect.width, rect.height]
+                .map { String(format: "%.1f", $0) }
+                .joined(separator: ",")
+        }.sorted().joined(separator: ";")
+        return [
+            String(match.pageIndex),
+            match.category,
+            PDFMasker.normalizedReplacementKey(for: match.matchedText),
+            String(match.textRotationDegrees),
+            rectangles
+        ].joined(separator: "|")
+    }
+
+    private func applySavedPrivateBatchDecisions(to found: inout [RedactionMatch]) {
+        guard let session = privateBatchSession,
+              let document = activePrivateBatchDocument(in: session) else { return }
+        let excluded = Set(document.excludedMatchFingerprints)
+        guard !excluded.isEmpty else { return }
+        for index in found.indices where excluded.contains(matchFingerprint(found[index])) {
+            found[index].isSelected = false
+        }
+    }
+
+    private func publishPrivateBatchStatus(userActionRequired: String?) {
+        publicStatusRevision += 1
+        guard let session = privateBatchSession else {
+            let publicStatus = PrivateBatchPublicStatus(
+                format: "masker-mcp-status",
+                version: 1,
+                revision: publicStatusRevision,
+                state: "idle",
+                sessionID: nil,
+                phase: nil,
+                documentCount: 0,
+                documents: [],
+                activeDocumentID: nil,
+                activeDocumentIndex: nil,
+                maskSetVersion: nil,
+                reviewedCount: 0,
+                staleCount: 0,
+                exportedCount: 0,
+                currentReviewed: false,
+                currentScanned: false,
+                matchCount: nil,
+                selectedMatchCount: nil,
+                busy: false,
+                userActionRequired: userActionRequired
+            )
+            try? PrivateBatchStore.savePublicStatus(publicStatus)
+            return
+        }
+        let documentStatuses = session.documents.enumerated().map { index, document in
+            let reviewedVersion = session.phase == .discovery
+                ? document.discoveryReviewedVersion
+                : document.finalReviewedVersion
+            let state: String
+            if document.exportedVersion == session.maskSetVersion {
+                state = "exported"
+            } else if reviewedVersion == session.maskSetVersion {
+                state = "reviewed"
+            } else if reviewedVersion != nil {
+                state = "stale"
+            } else {
+                state = "unreviewed"
+            }
+            return PrivateBatchPublicDocumentStatus(id: document.id, index: index + 1, state: state)
+        }
+        let activeIndex = privateBatchActiveDocumentIndex
+        let reviewedCount = documentStatuses.filter { $0.state == "reviewed" || $0.state == "exported" }.count
+        let staleCount = documentStatuses.filter { $0.state == "stale" }.count
+        let exportedCount = documentStatuses.filter { $0.state == "exported" }.count
+        let scanned = privateBatchCurrentIsScanned
+        let publicStatus = PrivateBatchPublicStatus(
+            format: "masker-mcp-status",
+            version: 1,
+            revision: publicStatusRevision,
+            state: isBusy ? "busy" : "ready",
+            sessionID: session.id,
+            phase: session.phase.rawValue,
+            documentCount: session.documents.count,
+            documents: documentStatuses,
+            activeDocumentID: session.activeDocumentID,
+            activeDocumentIndex: activeIndex.map { $0 + 1 },
+            maskSetVersion: session.maskSetVersion,
+            reviewedCount: reviewedCount,
+            staleCount: staleCount,
+            exportedCount: exportedCount,
+            currentReviewed: privateBatchCurrentIsReviewed,
+            currentScanned: scanned,
+            matchCount: scanned ? matches.count : nil,
+            selectedMatchCount: scanned ? selectedCount : nil,
+            busy: isBusy,
+            userActionRequired: userActionRequired
+        )
+        try? PrivateBatchStore.savePublicStatus(publicStatus)
     }
 
     func addFiles(_ urls: [URL]) {
@@ -208,6 +649,12 @@ final class MaskerModel: ObservableObject {
     }
 
     func stashMaskValuesForLoadedFiles() {
+        if let session = privateBatchSession,
+           let loadedDocument = activePrivateBatchDocument(in: session),
+           activeFileURL?.standardizedFileURL.path == loadedDocument.path {
+            savePrivateBatchState()
+            return
+        }
         guard !files.isEmpty else { return }
         var stored = userDefaults.dictionary(forKey: Self.maskValuesByPDFPathKey) as? [String: String] ?? [:]
         var storedReplacements = userDefaults.dictionary(
@@ -475,14 +922,17 @@ final class MaskerModel: ObservableObject {
         isBusy = true
         matches = []
         status = "Starting local scan..."
+        publishPrivateBatchStatus(userActionRequired: nil)
 
         DispatchQueue.global(qos: .userInitiated).async {
             let found = PDFMasker.scan(files: inputFiles, exactTerms: terms, options: options) { message in
                 DispatchQueue.main.async { self.status = message }
             }
             DispatchQueue.main.async {
-                self.matches = found
-                self.selectedMatchID = found.first?.id
+                var reviewed = found
+                self.applySavedPrivateBatchDecisions(to: &reviewed)
+                self.matches = reviewed
+                self.selectedMatchID = reviewed.first?.id
                 if let previous = previouslyActiveFile,
                    inputFiles.contains(where: { $0.standardizedFileURL == previous.standardizedFileURL }) {
                     self.activeFileURL = previous
@@ -492,9 +942,14 @@ final class MaskerModel: ObservableObject {
                     self.currentPreviewPage = 0
                 }
                 self.isBusy = false
-                self.status = found.isEmpty
+                if let session = self.privateBatchSession, self.isPrivateBatchDocumentLoaded {
+                    self.lastScannedBatchDocumentID = session.activeDocumentID
+                    self.lastScannedBatchMaskSetVersion = session.maskSetVersion
+                }
+                self.status = reviewed.isEmpty
                     ? "No matches found. Check spelling or whether the PDF is readable."
-                    : "Found \(found.count) match\(found.count == 1 ? "" : "es"). Review the checked items before exporting."
+                    : "Found \(reviewed.count) match\(reviewed.count == 1 ? "" : "es"). Review the checked items before exporting."
+                self.publishPrivateBatchStatus(userActionRequired: "review_and_mark_current_document")
             }
         }
     }
@@ -508,6 +963,18 @@ final class MaskerModel: ObservableObject {
             showError("Choose an output folder.")
             return
         }
+        if let session = privateBatchSession, isPrivateBatchDocumentLoaded {
+            guard session.phase == .finalReview else {
+                showError("Begin the final pass before exporting private-batch documents.")
+                publishPrivateBatchStatus(userActionRequired: "begin_final_pass")
+                return
+            }
+            guard privateBatchCurrentIsReviewed, privateBatchCurrentIsScanned else {
+                showError("Rescan and mark the current document reviewed before exporting it.")
+                publishPrivateBatchStatus(userActionRequired: "scan_and_review_current_document")
+                return
+            }
+        }
 
         let inputFiles = files
         let reviewedMatches = matches
@@ -515,6 +982,7 @@ final class MaskerModel: ObservableObject {
         let replacementStyles = replacementStylesByValue
         isBusy = true
         status = "Preparing sanitized copies..."
+        publishPrivateBatchStatus(userActionRequired: nil)
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
@@ -529,13 +997,22 @@ final class MaskerModel: ObservableObject {
                 }
                 DispatchQueue.main.async {
                     self.isBusy = false
+                    if var session = self.privateBatchSession,
+                       let activeID = session.activeDocumentID,
+                       let index = session.documents.firstIndex(where: { $0.id == activeID }) {
+                        session.documents[index].exportedVersion = session.maskSetVersion
+                        try? PrivateBatchStore.save(session)
+                        self.privateBatchSession = session
+                    }
                     self.status = "Created and validated \(outputs.count) sanitized PDF\(outputs.count == 1 ? "" : "s") in \(folder.path)."
+                    self.publishPrivateBatchStatus(userActionRequired: "open_next_document")
                     NSWorkspace.shared.activateFileViewerSelecting(outputs)
                 }
             } catch {
                 DispatchQueue.main.async {
                     self.isBusy = false
                     self.showError(error.localizedDescription)
+                    self.publishPrivateBatchStatus(userActionRequired: "resolve_error_in_masker")
                 }
             }
         }
@@ -543,6 +1020,7 @@ final class MaskerModel: ObservableObject {
 
     func selectAll(_ selected: Bool) {
         for index in matches.indices { matches[index].isSelected = selected }
+        publishPrivateBatchStatus(userActionRequired: "review_and_mark_current_document")
     }
 
     func matchIsSelected(_ id: UUID) -> Bool {
@@ -552,6 +1030,7 @@ final class MaskerModel: ObservableObject {
     func setMatchSelected(_ selected: Bool, id: UUID) {
         guard let index = matches.firstIndex(where: { $0.id == id }) else { return }
         matches[index].isSelected = selected
+        publishPrivateBatchStatus(userActionRequired: "review_and_mark_current_document")
     }
 
     var replacementsByValue: [String: String] {
@@ -653,6 +1132,7 @@ final class MaskerModel: ObservableObject {
             matches[index].pageIndex == currentPreviewPage {
             matches[index].isSelected = selected
         }
+        publishPrivateBatchStatus(userActionRequired: "review_and_mark_current_document")
     }
 
     func showFile(_ file: URL) {
@@ -774,10 +1254,12 @@ struct ContentView: View {
         } message: {
             Text(model.errorMessage)
         }
-        .onOpenURL { url in
-            model.addFiles([url])
-        }
-        .onReceive(model.$exactValues.dropFirst()) { _ in
+        .onOpenURL { url in model.handleControlURL(url) }
+        .onReceive(
+            model.$exactValues
+                .dropFirst()
+                .debounce(for: .milliseconds(450), scheduler: RunLoop.main)
+        ) { _ in
             model.stashMaskValuesForLoadedFiles()
         }
     }
@@ -835,6 +1317,12 @@ struct ContentView: View {
                                 HStack(spacing: 8) {
                                     Button("Choose PDFs...") { choosePDFs() }
                                     Button {
+                                        model.beginPrivateBatchSelection()
+                                    } label: {
+                                        Label("Private Batch...", systemImage: "folder.badge.gearshape")
+                                    }
+                                    .help("Review a folder of private PDFs with one shared mask set")
+                                    Button {
                                         withAnimation { recentPDFsExpanded.toggle() }
                                     } label: {
                                         Label("Recents", systemImage: "clock")
@@ -866,6 +1354,56 @@ struct ContentView: View {
                                 .buttonStyle(.plain)
                             }
                             .font(.callout)
+                        }
+
+                        if let session = model.privateBatchSession {
+                            Divider()
+                            VStack(alignment: .leading, spacing: 7) {
+                                HStack {
+                                    Label("Private batch", systemImage: "lock.shield")
+                                        .font(.caption.weight(.semibold))
+                                    Spacer()
+                                    Text(session.phase == .discovery ? "Discovery" : "Final pass")
+                                        .font(.caption2.weight(.medium))
+                                        .foregroundStyle(.secondary)
+                                }
+                                if let index = model.privateBatchActiveDocumentIndex {
+                                    Text("Document \(index + 1) of \(session.documents.count) · mask set v\(session.maskSetVersion)")
+                                        .font(.caption)
+                                }
+                                Text("\(model.privateBatchReviewedCount) reviewed")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                if !model.isPrivateBatchDocumentLoaded {
+                                    Button("Resume Private Batch") { model.resumePrivateBatch() }
+                                        .controlSize(.small)
+                                } else {
+                                    HStack(spacing: 6) {
+                                    Button {
+                                        model.openAdjacentPrivateBatchDocument(offset: -1)
+                                    } label: {
+                                        Image(systemName: "chevron.left")
+                                    }
+                                    .disabled((model.privateBatchActiveDocumentIndex ?? 0) == 0)
+                                    Button("Mark Reviewed") {
+                                        model.markCurrentPrivateBatchDocumentReviewed()
+                                    }
+                                    .disabled(!model.privateBatchCurrentIsScanned || model.isBusy)
+                                    Button {
+                                        model.openAdjacentPrivateBatchDocument(offset: 1)
+                                    } label: {
+                                        Image(systemName: "chevron.right")
+                                    }
+                                    .disabled(!model.privateBatchCurrentIsReviewed ||
+                                        model.privateBatchActiveDocumentIndex == session.documents.count - 1)
+                                    if session.phase == .discovery {
+                                        Spacer()
+                                        Button("Final Pass") { model.beginPrivateBatchFinalPass() }
+                                    }
+                                    }
+                                    .controlSize(.small)
+                                }
+                            }
                         }
 
                         if recentPDFsExpanded {
@@ -1355,7 +1893,7 @@ struct ContentView: View {
         panel.canChooseDirectories = true
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK { model.outputFolder = panel.url }
+        if panel.runModal() == .OK, let folder = panel.url { model.setOutputFolder(folder) }
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {

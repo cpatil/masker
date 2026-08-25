@@ -7,6 +7,8 @@ build_dir="$project_dir/.build/release"
 module_cache="$project_dir/.build/module-cache-release"
 version="$(plutil -extract CFBundleShortVersionString raw "$project_dir/Info.plist")"
 zip_path="$build_dir/Masker-v${version}-macOS-universal.zip"
+mcp_zip_path="$build_dir/Masker-MCP-v${version}.zip"
+mcp_stage="$build_dir/Masker-MCP"
 
 mkdir -p "$build_dir" "$module_cache"
 export CLANG_MODULE_CACHE_PATH="$module_cache"
@@ -25,6 +27,7 @@ compile_arch() {
     -framework SwiftUI \
     -framework UniformTypeIdentifiers \
     -framework Vision \
+    "$project_dir/Sources/PrivateBatch.swift" \
     "$project_dir/Sources/MaskerCore.swift" \
     "$project_dir/Sources/MaskerApp.swift" \
     -o "$build_dir/Masker-$architecture"
@@ -39,8 +42,20 @@ lipo -create "$build_dir/Masker-arm64" "$build_dir/Masker-x86_64" -output "$app_
 codesign --force --deep --sign - "$app_dir"
 
 ditto -c -k --sequesterRsrc --keepParent "$app_dir" "$zip_path"
+rm -rf "$mcp_stage"
+mkdir -p "$mcp_stage/src"
+cp "$project_dir/mcp/src/index.mjs" "$mcp_stage/src/index.mjs"
+cp "$project_dir/mcp/package.json" "$mcp_stage/package.json"
+cp "$project_dir/mcp/package-lock.json" "$mcp_stage/package-lock.json"
+cp "$project_dir/mcp/run.sh" "$mcp_stage/run.sh"
+cp "$project_dir/mcp/install.sh" "$mcp_stage/install.sh"
+cp "$project_dir/mcp/README.md" "$mcp_stage/README.md"
+chmod 755 "$mcp_stage/run.sh" "$mcp_stage/install.sh"
+ditto -c -k --sequesterRsrc --keepParent "$mcp_stage" "$mcp_zip_path"
 codesign --verify --deep --strict "$app_dir"
 plutil -lint "$app_dir/Contents/Info.plist"
 file "$app_dir/Contents/MacOS/Masker"
 shasum -a 256 "$zip_path"
+shasum -a 256 "$mcp_zip_path"
 echo "Packaged $zip_path"
+echo "Packaged $mcp_zip_path"

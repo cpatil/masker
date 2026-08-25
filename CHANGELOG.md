@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.7.0 - 2026-08-25
+
+- Adds a private-batch workflow for reviewing a folder of PDFs against one shared, versioned mask set.
+- Adds a separate MCP companion that can advance the workflow using opaque document IDs and counts, without receiving filenames, paths, PDF text, mask values, labels, or screenshots.
+- Requires a human scan and review for every document during discovery, then a fresh scan and review before each final export.
+- Marks earlier reviews stale when the shared mask set changes and restores per-document exclusions when rescanning.
+- Detects source-file changes with SHA-256 fingerprints and never overwrites source PDFs.
+- Stores the private session locally with owner-only permissions and publishes a separately sanitized MCP status file.
+- Supports both the stateless MCP 2026-07-28 protocol and legacy 2025-era MCP clients over stdio.
+
 ## 1.6.1 - 2026-08-24
 
 - Fixes an Add & Rescan crash caused by review-row bindings retaining stale numeric indexes after the match array was cleared.

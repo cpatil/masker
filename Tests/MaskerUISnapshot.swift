@@ -11,6 +11,13 @@ struct MaskerUISnapshot {
         }
         let input = URL(fileURLWithPath: CommandLine.arguments[1])
         let output = URL(fileURLWithPath: CommandLine.arguments[2])
+        let privateStore = output.deletingLastPathComponent()
+            .appendingPathComponent("private-batch-store-\(UUID().uuidString)", isDirectory: true)
+        setenv("MASKER_PRIVATE_BATCH_DIRECTORY", privateStore.path, 1)
+        defer {
+            unsetenv("MASKER_PRIVATE_BATCH_DIRECTORY")
+            try? FileManager.default.removeItem(at: privateStore)
+        }
 
         let matches = PDFMasker.scan(
             files: [input],
@@ -237,6 +244,64 @@ struct MaskerUISnapshot {
         let clearedModel = MaskerModel(userDefaults: testDefaults)
         precondition(clearedModel.recentFiles.isEmpty, "Clear did not remove recent PDFs")
         precondition(clearedModel.stashedValueCount(for: input) == 0, "Clear did not remove saved mask values")
+        let batchFolder = output.deletingLastPathComponent()
+            .appendingPathComponent("private-batch-fixture-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: batchFolder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: batchFolder) }
+        try FileManager.default.copyItem(
+            at: input,
+            to: batchFolder.appendingPathComponent("first-generated-document.pdf")
+        )
+        try FileManager.default.copyItem(
+            at: input,
+            to: batchFolder.appendingPathComponent("second-generated-document.pdf")
+        )
+        let batchModel = MaskerModel(userDefaults: testDefaults)
+        batchModel.startPrivateBatch(in: batchFolder)
+        precondition(batchModel.privateBatchSession?.documents.count == 2, "Private batch did not enumerate two PDFs")
+        precondition(batchModel.recentFiles.isEmpty, "Private batch leaked documents into Recents")
+        let customOutput = batchFolder.appendingPathComponent("Reviewed Output", isDirectory: true)
+        batchModel.setOutputFolder(customOutput)
+        let outputFolderAfterReload = try PrivateBatchStore.load()?.outputFolderPath
+        precondition(
+            outputFolderAfterReload == customOutput.standardizedFileURL.path,
+            "Private-batch output folder was not persisted"
+        )
+        batchModel.handleControlURL(URL(string: "masker://private-batch/open?document=document-002")!)
+        precondition(
+            batchModel.privateBatchActiveDocumentIndex == 0,
+            "MCP control skipped an unreviewed private-batch document"
+        )
+        batchModel.exactValues = "Example Person"
+        batchModel.stashMaskValuesForLoadedFiles()
+        let firstVersion = batchModel.privateBatchSession?.maskSetVersion
+        batchModel.scan()
+        let firstScanDeadline = Date().addingTimeInterval(30)
+        while batchModel.isBusy, Date() < firstScanDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
+        precondition(batchModel.privateBatchCurrentIsScanned, "Private batch did not record its scan version")
+        batchModel.markCurrentPrivateBatchDocumentReviewed()
+        precondition(batchModel.privateBatchCurrentIsReviewed, "Private batch did not record first review")
+        batchModel.openAdjacentPrivateBatchDocument(offset: 1)
+        batchModel.exactValues += "\nJOE AND MARY FARMER"
+        batchModel.stashMaskValuesForLoadedFiles()
+        precondition(batchModel.privateBatchSession?.maskSetVersion != firstVersion, "Mask-set change did not advance its version")
+        batchModel.scan()
+        let secondScanDeadline = Date().addingTimeInterval(30)
+        while batchModel.isBusy, Date() < secondScanDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
+        batchModel.markCurrentPrivateBatchDocumentReviewed()
+        batchModel.beginPrivateBatchFinalPass()
+        precondition(batchModel.privateBatchSession?.phase == .finalReview, "Private batch did not enter final pass")
+        precondition(batchModel.privateBatchActiveDocumentIndex == 0, "Final pass did not restart at the first PDF")
+        let publicStatusData = try Data(contentsOf: PrivateBatchStore.publicStatusURL)
+        let publicStatusText = String(decoding: publicStatusData, as: UTF8.self)
+        precondition(!publicStatusText.contains(batchFolder.path), "MCP status leaked the private folder path")
+        precondition(!publicStatusText.contains("Example Person"), "MCP status leaked a mask value")
+        precondition(!publicStatusText.contains("first-generated-document"), "MCP status leaked a filename")
+        FileHandle.standardError.write(Data("PASS privateBatchWorkflowAndPrivacy\n".utf8))
         FileHandle.standardError.write(Data("PASS uiSnapshot=\(output.path) matches=\(matches.count)\n".utf8))
     }
 

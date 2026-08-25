@@ -22,3 +22,34 @@ swiftc \
   -o "$project_dir/.build/masker-self-test"
 
 "$project_dir/.build/masker-self-test" "$test_root"
+
+swiftc \
+  -swift-version 5 \
+  -O \
+  "$project_dir/Sources/PrivateBatch.swift" \
+  "$project_dir/Tests/PrivateBatchSelfTest.swift" \
+  -o "$project_dir/.build/private-batch-self-test"
+
+"$project_dir/.build/private-batch-self-test"
+
+swiftc \
+  -D SNAPSHOT_TEST \
+  -swift-version 5 \
+  -O \
+  -framework AppKit \
+  -framework CoreGraphics \
+  -framework CoreText \
+  -framework PDFKit \
+  -framework SwiftUI \
+  -framework UniformTypeIdentifiers \
+  -framework Vision \
+  "$project_dir/Sources/PrivateBatch.swift" \
+  "$project_dir/Sources/MaskerCore.swift" \
+  "$project_dir/Sources/MaskerApp.swift" \
+  "$project_dir/Tests/MaskerUISnapshot.swift" \
+  -o "$project_dir/.build/masker-ui-snapshot"
+
+env MASKER_SNAPSHOT_VERSION="v1.7.0" \
+  "$project_dir/.build/masker-ui-snapshot" \
+  "$test_root/sample-tax-document.pdf" \
+  "$test_root/ui-snapshot.png"
