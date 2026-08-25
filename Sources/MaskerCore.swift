@@ -12,6 +12,7 @@ struct RedactionMatch: Identifiable {
     let category: String
     let matchedText: String
     let rects: [CGRect]
+    let textRotationDegrees: Int
     var isSelected: Bool
 
     init(
@@ -21,6 +22,7 @@ struct RedactionMatch: Identifiable {
         category: String,
         matchedText: String,
         rects: [CGRect],
+        textRotationDegrees: Int = 0,
         isSelected: Bool = true
     ) {
         self.id = id
@@ -29,7 +31,36 @@ struct RedactionMatch: Identifiable {
         self.category = category
         self.matchedText = matchedText
         self.rects = rects
+        self.textRotationDegrees = textRotationDegrees
         self.isSelected = isSelected
+    }
+}
+
+enum ReplacementLabelAlignment: String, Codable, CaseIterable {
+    case left
+    case center
+    case right
+}
+
+struct ReplacementLabelStyle: Equatable {
+    var fontName: String = "Helvetica-Bold"
+    var fontSize: CGFloat? = nil
+    var widthFraction: CGFloat = 1
+    var alignment: ReplacementLabelAlignment = .center
+
+    static let standard = ReplacementLabelStyle()
+
+    var normalized: ReplacementLabelStyle {
+        let availableFonts = Set([
+            "Helvetica-Bold", "Helvetica", "Times-Bold", "Times-Roman",
+            "Courier-Bold", "Courier"
+        ])
+        return ReplacementLabelStyle(
+            fontName: availableFonts.contains(fontName) ? fontName : "Helvetica-Bold",
+            fontSize: fontSize.map { min(max($0, 4), 24) },
+            widthFraction: min(max(widthFraction, 0.35), 1),
+            alignment: alignment
+        )
     }
 }
 
@@ -67,6 +98,8 @@ enum PDFMasker {
     private struct ReplacementOverlay {
         let rects: [CGRect]
         let label: String
+        let rotationDegrees: Int
+        let style: ReplacementLabelStyle
     }
 
     private final class OCRPageCacheEntry: NSObject {
@@ -93,17 +126,23 @@ enum PDFMasker {
         let label: String
         let value: String
         let requiresDigitBoundaries: Bool
+        let requiresTokenBoundaries: Bool
     }
 
     static func scan(
         files: [URL],
         exactTerms: [String],
         options: PatternOptions,
+        matchExactWordBoundaries: Bool = true,
         shouldCancel: @escaping () -> Bool = { false },
         progress: @escaping (String) -> Void
     ) -> [RedactionMatch] {
         var allMatches: [RedactionMatch] = []
-        let primaryRules = searchRules(for: exactTerms, options: options)
+        let primaryRules = searchRules(
+            for: exactTerms,
+            options: options,
+            matchExactWordBoundaries: matchExactWordBoundaries
+        )
 
         for fileURL in files {
             if shouldCancel() { break }
@@ -183,6 +222,7 @@ enum PDFMasker {
         matches: [RedactionMatch],
         outputFolder: URL,
         replacementsByValue: [String: String] = [:],
+        replacementStylesByValue: [String: ReplacementLabelStyle] = [:],
         dpi: CGFloat = 300,
         progress: @escaping (String) -> Void
     ) throws -> [URL] {
@@ -233,7 +273,15 @@ enum PDFMasker {
                                     for: match.matchedText,
                                     replacementsByValue: replacementsByValue
                                 ) else { return nil }
-                                return ReplacementOverlay(rects: match.rects, label: label)
+                                return ReplacementOverlay(
+                                    rects: match.rects,
+                                    label: label,
+                                    rotationDegrees: match.textRotationDegrees,
+                                    style: replacementStyle(
+                                        for: match.matchedText,
+                                        replacementStylesByValue: replacementStylesByValue
+                                    )
+                                )
                             }
                         guard let image = renderPage(
                             page,
@@ -263,7 +311,8 @@ enum PDFMasker {
                 outputURL,
                 sourceDocument: document,
                 matches: fileMatches,
-                replacementsByValue: replacementsByValue
+                replacementsByValue: replacementsByValue,
+                replacementStylesByValue: replacementStylesByValue
             ) {
                 try? FileManager.default.removeItem(at: outputURL)
                 throw MaskerError.outputValidationFailed(outputURL, validationFailure)
@@ -279,6 +328,7 @@ enum PDFMasker {
         pageIndex: Int,
         matches: [RedactionMatch],
         replacementsByValue: [String: String] = [:],
+        replacementStylesByValue: [String: ReplacementLabelStyle] = [:],
         dpi: CGFloat = 110
     ) -> NSImage? {
         guard let document = PDFDocument(url: fileURL), let page = document.page(at: pageIndex) else { return nil }
@@ -289,7 +339,15 @@ enum PDFMasker {
                 for: match.matchedText,
                 replacementsByValue: replacementsByValue
             ) else { return nil }
-            return ReplacementOverlay(rects: match.rects, label: label)
+            return ReplacementOverlay(
+                rects: match.rects,
+                label: label,
+                rotationDegrees: match.textRotationDegrees,
+                style: replacementStyle(
+                    for: match.matchedText,
+                    replacementStylesByValue: replacementStylesByValue
+                )
+            )
         }
         guard let cgImage = renderPage(
             page,
@@ -340,6 +398,7 @@ enum PDFMasker {
                 let found = nsText.range(of: rule.value, options: [.caseInsensitive, .diacriticInsensitive], range: searchRange)
                 guard found.location != NSNotFound else { break }
                 if (!rule.requiresDigitBoundaries || hasDigitBoundaries(in: nsText, range: found)),
+                   (!rule.requiresTokenBoundaries || hasTokenBoundaries(in: nsText, range: found, value: rule.value)),
                    let match = nativeMatch(
                     page: page,
                     range: found,
@@ -404,13 +463,67 @@ enum PDFMasker {
         let rects = safeRedactionRects(candidateRects, on: page)
 
         guard !rects.isEmpty else { return nil }
+        let rotation = nativeTextRotation(
+            page: page,
+            range: range,
+            pageTransform: pageTransform,
+            transformedPageBounds: transformedPageBounds,
+            fallbackRects: rects
+        )
         return RedactionMatch(
             fileURL: fileURL,
             pageIndex: pageIndex,
             category: category,
             matchedText: text,
-            rects: rects
+            rects: rects,
+            textRotationDegrees: rotation
         )
+    }
+
+    private static func nativeTextRotation(
+        page: PDFPage,
+        range: NSRange,
+        pageTransform: CGAffineTransform,
+        transformedPageBounds: CGRect,
+        fallbackRects: [CGRect]
+    ) -> Int {
+        guard range.length > 1 else {
+            return fallbackTextRotation(page: page, rects: fallbackRects)
+        }
+        let endpointRanges = [
+            NSRange(location: range.location, length: 1),
+            NSRange(location: range.location + range.length - 1, length: 1)
+        ]
+        let centers = endpointRanges.compactMap { endpoint -> CGPoint? in
+            guard let selection = page.selection(for: endpoint) else { return nil }
+            let pageRect = selection.bounds(for: page)
+            guard !pageRect.isEmpty else { return nil }
+            let displayRect = pageRect.applying(pageTransform).standardized.offsetBy(
+                dx: -transformedPageBounds.minX,
+                dy: -transformedPageBounds.minY
+            )
+            return CGPoint(x: displayRect.midX, y: displayRect.midY)
+        }
+        guard centers.count == 2 else {
+            return fallbackTextRotation(page: page, rects: fallbackRects)
+        }
+        return textRotation(from: centers[0], to: centers[1]) ??
+            fallbackTextRotation(page: page, rects: fallbackRects)
+    }
+
+    private static func fallbackTextRotation(page: PDFPage, rects: [CGRect]) -> Int {
+        guard let rect = rects.max(by: { $0.width * $0.height < $1.width * $1.height }),
+              rect.height > rect.width * 1.35 else { return 0 }
+        let pageRotation = ((page.rotation % 360) + 360) % 360
+        return pageRotation == 90 || pageRotation == 270 ? pageRotation : 90
+    }
+
+    private static func textRotation(from start: CGPoint, to end: CGPoint) -> Int? {
+        let dx = end.x - start.x
+        let dy = end.y - start.y
+        guard hypot(dx, dy) >= 2 else { return nil }
+        if abs(dx) >= abs(dy) { return dx >= 0 ? 0 : 180 }
+        return dy >= 0 ? 90 : 270
     }
 
     private static func scanImagePage(
@@ -442,6 +555,7 @@ enum PDFMasker {
                     let found = nsLine.range(of: rule.value, options: [.caseInsensitive, .diacriticInsensitive], range: searchRange)
                     guard found.location != NSNotFound else { break }
                     if (!rule.requiresDigitBoundaries || hasDigitBoundaries(in: nsLine, range: found)),
+                       (!rule.requiresTokenBoundaries || hasTokenBoundaries(in: nsLine, range: found, value: rule.value)),
                        let swiftRange = Range(found, in: line),
                        let box = try? candidate.boundingBox(for: swiftRange) {
                         matches.append(ocrMatch(
@@ -450,7 +564,8 @@ enum PDFMasker {
                             fileURL: fileURL,
                             pageIndex: pageIndex,
                             category: rule.label + " (OCR)",
-                            text: nsLine.substring(with: found)
+                            text: nsLine.substring(with: found),
+                            textRotationDegrees: ocrTextRotation(candidate: candidate, range: swiftRange)
                         ))
                     }
                     let nextLocation = found.location + max(found.length, 1)
@@ -470,7 +585,8 @@ enum PDFMasker {
                         fileURL: fileURL,
                         pageIndex: pageIndex,
                         category: rule.label + " (OCR)",
-                        text: nsLine.substring(with: result.range)
+                        text: nsLine.substring(with: result.range),
+                        textRotationDegrees: ocrTextRotation(candidate: candidate, range: swiftRange)
                     ))
                 }
             }
@@ -485,7 +601,8 @@ enum PDFMasker {
                     fileURL: fileURL,
                     pageIndex: pageIndex,
                     category: "Account suffix (OCR)",
-                    text: nsLine.substring(with: suffix)
+                    text: nsLine.substring(with: suffix),
+                    textRotationDegrees: ocrTextRotation(candidate: candidate, range: swiftRange)
                 ))
             }
         }
@@ -538,7 +655,8 @@ enum PDFMasker {
         fileURL: URL,
         pageIndex: Int,
         category: String,
-        text: String
+        text: String,
+        textRotationDegrees: Int = 0
     ) -> RedactionMatch {
         let rect = CGRect(
             x: box.minX * displaySize.width,
@@ -551,8 +669,26 @@ enum PDFMasker {
             pageIndex: pageIndex,
             category: category,
             matchedText: text,
-            rects: [rect]
+            rects: [rect],
+            textRotationDegrees: textRotationDegrees
         )
+    }
+
+    private static func ocrTextRotation(
+        candidate: VNRecognizedText,
+        range: Range<String.Index>
+    ) -> Int {
+        guard range.lowerBound < range.upperBound else { return 0 }
+        let string = candidate.string
+        let firstEnd = string.index(after: range.lowerBound)
+        let lastStart = string.index(before: range.upperBound)
+        let endpointRanges = [range.lowerBound..<firstEnd, lastStart..<range.upperBound]
+        let centers = endpointRanges.compactMap { endpoint -> CGPoint? in
+            guard let box = try? candidate.boundingBox(for: endpoint) else { return nil }
+            return CGPoint(x: box.boundingBox.midX, y: box.boundingBox.midY)
+        }
+        guard centers.count == 2 else { return 0 }
+        return textRotation(from: centers[0], to: centers[1]) ?? 0
     }
 
     private static func patternRules(_ options: PatternOptions) -> [PatternRule] {
@@ -701,7 +837,11 @@ enum PDFMasker {
             .uppercased()
     }
 
-    private static func searchRules(for exactTerms: [String], options: PatternOptions) -> [SearchRule] {
+    private static func searchRules(
+        for exactTerms: [String],
+        options: PatternOptions,
+        matchExactWordBoundaries: Bool
+    ) -> [SearchRule] {
         var rules: [SearchRule] = []
         var seen = Set<String>()
 
@@ -710,13 +850,23 @@ enum PDFMasker {
             guard !trimmed.isEmpty else { continue }
             let exactKey = trimmed.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             if seen.insert(exactKey).inserted {
-                rules.append(SearchRule(label: "Exact value", value: trimmed, requiresDigitBoundaries: false))
+                rules.append(SearchRule(
+                    label: "Exact value",
+                    value: trimmed,
+                    requiresDigitBoundaries: false,
+                    requiresTokenBoundaries: matchExactWordBoundaries
+                ))
             }
 
             if options.generateNameVariants, let variant = firstAndLastNameVariant(from: trimmed) {
                 let variantKey = variant.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
                 if seen.insert(variantKey).inserted {
-                    rules.append(SearchRule(label: "Name variant", value: variant, requiresDigitBoundaries: false))
+                    rules.append(SearchRule(
+                        label: "Name variant",
+                        value: variant,
+                        requiresDigitBoundaries: false,
+                        requiresTokenBoundaries: matchExactWordBoundaries
+                    ))
                 }
             }
         }
@@ -750,7 +900,12 @@ enum PDFMasker {
             guard let label = baseLabel else { continue }
             let digits = match.matchedText.filter(\.isNumber)
             guard digits.count == 9, seen.insert("\(label)|\(digits)").inserted else { continue }
-            rules.append(SearchRule(label: label, value: digits, requiresDigitBoundaries: true))
+            rules.append(SearchRule(
+                label: label,
+                value: digits,
+                requiresDigitBoundaries: true,
+                requiresTokenBoundaries: false
+            ))
         }
         return rules
     }
@@ -765,6 +920,24 @@ enum PDFMasker {
         if nextLocation < text.length {
             let next = text.substring(with: NSRange(location: nextLocation, length: 1))
             if next.unicodeScalars.contains(where: { decimalDigits.contains($0) }) { return false }
+        }
+        return true
+    }
+
+    private static func hasTokenBoundaries(in text: NSString, range: NSRange, value: String) -> Bool {
+        let tokenCharacters = CharacterSet.alphanumerics
+        let valueScalars = value.unicodeScalars
+        let startsWithToken = valueScalars.first.map(tokenCharacters.contains) ?? false
+        let endsWithToken = valueScalars.last.map(tokenCharacters.contains) ?? false
+
+        if startsWithToken, range.location > 0 {
+            let previous = text.substring(with: NSRange(location: range.location - 1, length: 1))
+            if previous.unicodeScalars.contains(where: tokenCharacters.contains) { return false }
+        }
+        let nextLocation = range.location + range.length
+        if endsWithToken, nextLocation < text.length {
+            let next = text.substring(with: NSRange(location: nextLocation, length: 1))
+            if next.unicodeScalars.contains(where: tokenCharacters.contains) { return false }
         }
         return true
     }
@@ -871,6 +1044,14 @@ enum PDFMasker {
         return label.isEmpty ? nil : label
     }
 
+    static func replacementStyle(
+        for value: String,
+        replacementStylesByValue: [String: ReplacementLabelStyle]
+    ) -> ReplacementLabelStyle {
+        let key = normalizedReplacementKey(for: value)
+        return (replacementStylesByValue[key] ?? .standard).normalized
+    }
+
     private static func renderPage(
         _ page: PDFPage,
         dpi: CGFloat,
@@ -932,10 +1113,18 @@ enum PDFMasker {
             }
             for overlay in replacementOverlays {
                 guard let labelRect = safeRedactionRects(overlay.rects, on: page).max(by: {
-                    if abs($0.width - $1.width) > 0.5 { return $0.width < $1.width }
+                    let firstLength = overlay.rotationDegrees % 180 == 0 ? $0.width : $0.height
+                    let secondLength = overlay.rotationDegrees % 180 == 0 ? $1.width : $1.height
+                    if abs(firstLength - secondLength) > 0.5 { return firstLength < secondLength }
                     return $0.width * $0.height < $1.width * $1.height
                 }) else { continue }
-                drawReplacementLabel(overlay.label, in: labelRect, context: bitmap)
+                drawReplacementLabel(
+                    overlay.label,
+                    in: labelRect,
+                    context: bitmap,
+                    rotationDegrees: overlay.rotationDegrees,
+                    style: overlay.style
+                )
             }
         }
         return bitmap.makeImage()
@@ -944,15 +1133,42 @@ enum PDFMasker {
     static func drawReplacementLabel(
         _ label: String,
         in rect: CGRect,
-        context: CGContext
+        context: CGContext,
+        rotationDegrees: Int = 0,
+        style: ReplacementLabelStyle = .standard
     ) {
-        let available = rect.insetBy(dx: 2, dy: 1)
+        let normalizedRotation = ((rotationDegrees % 360) + 360) % 360
+        let normalizedStyle = style.normalized
+        let isQuarterTurn = normalizedRotation == 90 || normalizedRotation == 270
+        let localSize = isQuarterTurn
+            ? CGSize(width: rect.height, height: rect.width)
+            : rect.size
+        let fullAvailable = CGRect(
+            x: -localSize.width / 2,
+            y: -localSize.height / 2,
+            width: localSize.width,
+            height: localSize.height
+        ).insetBy(dx: 2, dy: 1)
+        let frameWidth = fullAvailable.width * normalizedStyle.widthFraction
+        let frameX: CGFloat
+        switch normalizedStyle.alignment {
+        case .left: frameX = fullAvailable.minX
+        case .center: frameX = fullAvailable.midX - frameWidth / 2
+        case .right: frameX = fullAvailable.maxX - frameWidth
+        }
+        let available = CGRect(
+            x: frameX,
+            y: fullAvailable.minY,
+            width: frameWidth,
+            height: fullAvailable.height
+        )
         guard available.width >= 6, available.height >= 4 else { return }
 
-        let maximumSize = min(10, max(available.height * 0.62, 4))
+        let automaticSize = min(10, max(available.height * 0.62, 4))
+        let maximumSize = min(normalizedStyle.fontSize ?? automaticSize, max(available.height * 0.78, 4))
         let minimumSize: CGFloat = 4
         var fontSize = maximumSize
-        var font = CTFontCreateWithName("Helvetica-Bold" as CFString, fontSize, nil)
+        var font = CTFontCreateWithName(normalizedStyle.fontName as CFString, fontSize, nil)
         var attributes: [CFString: Any] = [
             kCTFontAttributeName: font,
             kCTForegroundColorAttributeName: NSColor.white.cgColor
@@ -963,7 +1179,7 @@ enum PDFMasker {
         var width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
         if width > available.width {
             fontSize = max(minimumSize, fontSize * available.width / max(width, 1))
-            font = CTFontCreateWithName("Helvetica-Bold" as CFString, fontSize, nil)
+            font = CTFontCreateWithName(normalizedStyle.fontName as CFString, fontSize, nil)
             attributes[kCTFontAttributeName] = font
             line = CTLineCreateWithAttributedString(
                 CFAttributedStringCreate(nil, label as CFString, attributes as CFDictionary)
@@ -983,9 +1199,16 @@ enum PDFMasker {
         var ascent: CGFloat = 0
         var descent: CGFloat = 0
         _ = CTLineGetTypographicBounds(line, &ascent, &descent, nil)
-        let x = available.minX + max((available.width - width) / 2, 0)
+        let x: CGFloat
+        switch normalizedStyle.alignment {
+        case .left: x = available.minX
+        case .center: x = available.minX + max((available.width - width) / 2, 0)
+        case .right: x = available.maxX - min(width, available.width)
+        }
         let y = available.midY - (ascent - descent) / 2
         context.saveGState()
+        context.translateBy(x: rect.midX, y: rect.midY)
+        context.rotate(by: CGFloat(normalizedRotation) * .pi / 180)
         context.textMatrix = .identity
         context.textPosition = CGPoint(x: x, y: y)
         CTLineDraw(line, context)
@@ -996,13 +1219,15 @@ enum PDFMasker {
         _ url: URL,
         sourceDocument: PDFDocument,
         matches: [RedactionMatch],
-        replacementsByValue: [String: String] = [:]
+        replacementsByValue: [String: String] = [:],
+        replacementStylesByValue: [String: ReplacementLabelStyle] = [:]
     ) -> Bool {
         sanitizedOutputValidationFailure(
             url,
             sourceDocument: sourceDocument,
             matches: matches,
-            replacementsByValue: replacementsByValue
+            replacementsByValue: replacementsByValue,
+            replacementStylesByValue: replacementStylesByValue
         ) == nil
     }
 
@@ -1010,7 +1235,8 @@ enum PDFMasker {
         _ url: URL,
         sourceDocument: PDFDocument,
         matches: [RedactionMatch],
-        replacementsByValue: [String: String] = [:]
+        replacementsByValue: [String: String] = [:],
+        replacementStylesByValue: [String: ReplacementLabelStyle] = [:]
     ) -> String? {
         guard let output = PDFDocument(url: url) else { return "the output could not be reopened" }
         guard output.pageCount == sourceDocument.pageCount else { return "the page count changed" }
@@ -1035,7 +1261,15 @@ enum PDFMasker {
                         for: match.matchedText,
                         replacementsByValue: replacementsByValue
                     ) else { return nil }
-                    return ReplacementOverlay(rects: match.rects, label: label)
+                    return ReplacementOverlay(
+                        rects: match.rects,
+                        label: label,
+                        rotationDegrees: match.textRotationDegrees,
+                        style: replacementStyle(
+                            for: match.matchedText,
+                            replacementStylesByValue: replacementStylesByValue
+                        )
+                    )
                 }
             guard let expectedImage = renderPage(
                     sourcePage,

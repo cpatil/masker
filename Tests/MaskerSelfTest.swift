@@ -48,6 +48,7 @@ struct MaskerSelfTest {
             exactTerms: [
                 "Jordan",
                 "Alex & Jordan",
+                "PATI",
                 "Example Person",
                 fullFarmerName,
                 "444-55-6666",
@@ -62,8 +63,26 @@ struct MaskerSelfTest {
         let nativeSSNs = matches.filter { $0.matchedText == "123-45-6789" }
         let scannedSSNs = matches.filter { $0.matchedText == "444-55-6666" }
         let rotatedSSNs = matches.filter { $0.matchedText == "555-66-7777" }
+        let rotatedReplacement = [
+            PDFMasker.normalizedReplacementKey(for: "555-66-7777"): "Tax ID"
+        ]
+        let rotatedStyles = [
+            PDFMasker.normalizedReplacementKey(for: "555-66-7777"): ReplacementLabelStyle(
+                fontName: "Courier-Bold",
+                fontSize: 10,
+                widthFraction: 0.75,
+                alignment: .left
+            )
+        ]
         if !rotatedSSNs.isEmpty,
-           let preview = PDFMasker.previewImage(fileURL: source, pageIndex: 2, matches: rotatedSSNs, dpi: 180),
+           let preview = PDFMasker.previewImage(
+                fileURL: source,
+                pageIndex: 2,
+                matches: rotatedSSNs,
+                replacementsByValue: rotatedReplacement,
+                replacementStylesByValue: rotatedStyles,
+                dpi: 180
+           ),
            let cgImage = preview.cgImage(forProposedRect: nil, context: nil, hints: nil) {
             let representation = NSBitmapImageRep(cgImage: cgImage)
             if let data = representation.representation(using: .png, properties: [:]) {
@@ -73,6 +92,10 @@ struct MaskerSelfTest {
         try require(!nativeSSNs.isEmpty, "Failed to detect the native-text SSN")
         try require(!scannedSSNs.isEmpty, "Failed to detect the image-only SSN using OCR")
         try require(!rotatedSSNs.isEmpty, "Failed to detect the rotated-page SSN")
+        try require(
+            rotatedSSNs.allSatisfy { $0.textRotationDegrees == 90 || $0.textRotationDegrees == 270 },
+            "Rotated-page text orientation was not detected: \(rotatedSSNs.map(\.textRotationDegrees))"
+        )
         try require(matches.contains(where: { $0.matchedText.caseInsensitiveCompare("Example Person") == .orderedSame }), "Failed to detect exact name")
         let standaloneJordanMatches = matches.filter {
             $0.matchedText.caseInsensitiveCompare("Jordan") == .orderedSame
@@ -84,6 +107,11 @@ struct MaskerSelfTest {
         try require(
             matches.contains(where: { $0.matchedText.caseInsensitiveCompare("Alex & Jordan") == .orderedSame }),
             "Longest-match selection dropped the complete Alex & Jordan value"
+        )
+        let standalonePATI = matches.filter { $0.matchedText.caseInsensitiveCompare("PATI") == .orderedSame }
+        try require(
+            standalonePATI.count == 2,
+            "Exact value PATI should match standalone tokens twice without matching inside Participation"
         )
         let joeFarmerMatches = matches.filter {
             $0.matchedText.uppercased() == joeFarmerVariant && $0.category == "Name variant"
@@ -113,6 +141,7 @@ struct MaskerSelfTest {
             files: [source],
             exactTerms: ["Example P"],
             options: PatternOptions(detectSSN: false, detectEIN: false, detectEmail: false, detectPhone: false),
+            matchExactWordBoundaries: false,
             progress: { _ in }
         )
         try require(
@@ -221,13 +250,26 @@ struct MaskerSelfTest {
 
         let replacements = [
             PDFMasker.normalizedReplacementKey(for: "Example Person"): "Client",
-            PDFMasker.normalizedReplacementKey(for: "3436"): "Account 1"
+            PDFMasker.normalizedReplacementKey(for: "3436"): "Account 1",
+            PDFMasker.normalizedReplacementKey(for: "555-66-7777"): "Tax ID"
+        ]
+        let replacementStyles = [
+            PDFMasker.normalizedReplacementKey(for: "Example Person"): ReplacementLabelStyle(
+                fontName: "Times-Bold",
+                fontSize: 12,
+                widthFraction: 0.75,
+                alignment: .left
+            ),
+            PDFMasker.normalizedReplacementKey(for: "555-66-7777"): rotatedStyles[
+                PDFMasker.normalizedReplacementKey(for: "555-66-7777")
+            ]!
         ]
         if let preview = PDFMasker.previewImage(
             fileURL: source,
             pageIndex: 0,
             matches: matches,
             replacementsByValue: replacements,
+            replacementStylesByValue: replacementStyles,
             dpi: 180
         ), let cgImage = preview.cgImage(forProposedRect: nil, context: nil, hints: nil) {
             let representation = NSBitmapImageRep(cgImage: cgImage)
@@ -250,6 +292,7 @@ struct MaskerSelfTest {
             matches: matches + [pathologicalRect],
             outputFolder: outputs,
             replacementsByValue: replacements,
+            replacementStylesByValue: replacementStyles,
             progress: { _ in }
         )
         try require(created.count == 1, "Expected one output")
@@ -265,18 +308,27 @@ struct MaskerSelfTest {
             corruptOutput,
             sourceDocument: sourceDocument,
             matches: matches + [pathologicalRect],
-            replacementsByValue: replacements
+            replacementsByValue: replacements,
+            replacementStylesByValue: replacementStyles
         )
         try require(corruptFailure != nil, "Visual validation accepted a half-corrupted PDF")
         try require(corruptFailure?.contains("page 1") == true, "Visual validation did not identify the corrupted page")
 
         let residual = PDFMasker.scan(
             files: created,
-            exactTerms: ["Alex & Jordan", "Jordan", "Example Person", fullFarmerName, joeFarmerVariant, "123-45-6789", "123456789", "444-55-6666", "555-66-7777", "98-7654321", "987654321", "alpha@example.com", "(415) 555-0198"] + expectedSuffixes,
+            exactTerms: ["Alex & Jordan", "Jordan", "PATI", "Example Person", fullFarmerName, joeFarmerVariant, "123-45-6789", "123456789", "444-55-6666", "555-66-7777", "98-7654321", "987654321", "alpha@example.com", "(415) 555-0198"] + expectedSuffixes,
             options: PatternOptions(detectSSN: true, detectEIN: true, detectEmail: true, detectPhone: true, generateNameVariants: true, detectAccountSuffixes: true),
             progress: { _ in }
         )
         try require(residual.isEmpty, "OCR found sensitive text after sanitization: \(residual.map(\.matchedText))")
+
+        let preservedParticipation = PDFMasker.scan(
+            files: created,
+            exactTerms: ["Participation"],
+            options: PatternOptions(detectSSN: false, detectEIN: false, detectEmail: false, detectPhone: false),
+            progress: { _ in }
+        )
+        try require(!preservedParticipation.isEmpty, "Word-boundary masking damaged Participation")
 
         let visibleLabels = PDFMasker.scan(
             files: created,
@@ -342,7 +394,7 @@ struct MaskerSelfTest {
         pdf.beginPDFPage(nil)
         pdf.setFillColor(NSColor.white.cgColor)
         pdf.fill(mediaBox)
-        drawText("Taxpayer: Example Person\nOwners: JOE AND MARY FARMER\nShort form: Joe Farmer\nHousehold: Alex & Jordan\nSeparate contact: Jordan\nSSN: 123-45-6789\nSSN copy: 123456789\nEIN: 98-7654321\nEIN copy: 987654321\nEmail: alpha@example.com\nPhone: (415) 555-0198", in: pdf, at: CGPoint(x: 72, y: 700))
+        drawText("Taxpayer: Example Person\nOwners: JOE AND MARY FARMER\nShort form: Joe Farmer\nHousehold: Alex & Jordan\nSeparate contact: Jordan\nCode: PATI\nAlias: (PATI)\nTopic: Participation\nSSN: 123-45-6789\nSSN copy: 123456789\nEIN: 98-7654321\nEIN copy: 987654321\nEmail: alpha@example.com\nPhone: (415) 555-0198", in: pdf, at: CGPoint(x: 72, y: 700), frameHeight: 390)
         pdf.endPDFPage()
 
         pdf.beginPDFPage(nil)
@@ -378,7 +430,7 @@ struct MaskerSelfTest {
             }
             if let page = document.page(at: 0) {
                 let annotation = PDFAnnotation(
-                    bounds: CGRect(x: 72, y: 410, width: 280, height: 44),
+                    bounds: CGRect(x: 72, y: 250, width: 280, height: 44),
                     forType: .freeText,
                     withProperties: nil
                 )

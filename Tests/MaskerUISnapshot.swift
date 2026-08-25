@@ -37,6 +37,10 @@ struct MaskerUISnapshot {
         seedModel.addFiles([input])
         seedModel.exactValues = "JOE AND MARY FARMER\n444-55-6666"
         seedModel.setReplacementText("Client", for: "JOE AND MARY FARMER")
+        seedModel.setReplacementFontName("Times-Bold", for: "JOE AND MARY FARMER")
+        seedModel.setReplacementFontSize(12, for: "JOE AND MARY FARMER")
+        seedModel.setReplacementWidthPercent(75, for: "JOE AND MARY FARMER")
+        seedModel.setReplacementJustification("left", for: "JOE AND MARY FARMER")
         seedModel.stashMaskValuesForLoadedFiles()
 
         let model = MaskerModel(userDefaults: testDefaults)
@@ -50,6 +54,10 @@ struct MaskerUISnapshot {
             model.replacementText(for: "joe and mary farmer") == "Client",
             "Saved replacement label was not restored case-insensitively"
         )
+        precondition(model.replacementFontName(for: "joe and mary farmer") == "Times-Bold", "Saved label font was not restored")
+        precondition(model.replacementFontSize(for: "joe and mary farmer") == 12, "Saved label size was not restored")
+        precondition(model.replacementWidthPercent(for: "joe and mary farmer") == 75, "Saved label width was not restored")
+        precondition(model.replacementJustification(for: "joe and mary farmer") == "left", "Saved label alignment was not restored")
         model.outputFolder = URL(fileURLWithPath: "/Users/example/Documents/Masked PDFs", isDirectory: true)
         model.detectEmail = true
         model.detectPhone = true
@@ -69,6 +77,7 @@ struct MaskerUISnapshot {
 
         let app = NSApplication.shared
         app.setActivationPolicy(.prohibited)
+        app.appearance = NSAppearance(named: .aqua)
         let size = NSSize(width: 1440, height: 950)
         let root = ContentView(model: model).frame(width: size.width, height: size.height)
         let hosting = NSHostingView(rootView: root)
@@ -97,7 +106,11 @@ struct MaskerUISnapshot {
         precondition(
             exportedMasks?.contains(where: {
                 ($0["value"] as? String)?.caseInsensitiveCompare("JOE AND MARY FARMER") == .orderedSame &&
-                    $0["replaceWith"] as? String == "Client"
+                    $0["replaceWith"] as? String == "Client" &&
+                    $0["fontName"] as? String == "Times-Bold" &&
+                    $0["fontSize"] as? Double == 12 &&
+                    $0["widthPercent"] as? Double == 75 &&
+                    $0["justification"] as? String == "left"
             }) == true,
             "Mask-value export did not carry the replacement mapping"
         )
@@ -116,6 +129,10 @@ struct MaskerUISnapshot {
             model.replacementText(for: "Joe And Mary Farmer") == "Client",
             "Mask-value import did not restore the replacement mapping"
         )
+        precondition(model.replacementFontName(for: "Joe And Mary Farmer") == "Times-Bold", "Mask-value import did not restore the label font")
+        precondition(model.replacementFontSize(for: "Joe And Mary Farmer") == 12, "Mask-value import did not restore the label size")
+        precondition(model.replacementWidthPercent(for: "Joe And Mary Farmer") == 75, "Mask-value import did not restore the label width")
+        precondition(model.replacementJustification(for: "Joe And Mary Farmer") == "left", "Mask-value import did not restore the label alignment")
         let exportedFile = output.deletingLastPathComponent().appendingPathComponent("roundtrip-mask-values.json")
         try exportedData.write(to: exportedFile, options: .atomic)
         model.exactValues = ""
@@ -198,6 +215,21 @@ struct MaskerUISnapshot {
             fatalError("Could not encode snapshot")
         }
         try png.write(to: output)
+
+        model.pdfSearchText = "Example Person"
+        model.addSearchTermAndRescan()
+        let rescanDeadline = Date().addingTimeInterval(30)
+        while model.isBusy, Date() < rescanDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
+        precondition(!model.isBusy, "Add & Rescan did not finish")
+        precondition(
+            model.matches.contains(where: {
+                $0.matchedText.caseInsensitiveCompare("Example Person") == .orderedSame
+            }),
+            "Add & Rescan did not add the new exact value"
+        )
+        FileHandle.standardError.write(Data("PASS addAndRescanStableBindings\n".utf8))
 
         window.orderOut(nil)
         window.contentView = nil

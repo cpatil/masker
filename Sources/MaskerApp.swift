@@ -59,8 +59,12 @@ private extension View {
 
 final class MaskerModel: ObservableObject {
     private struct MaskValueEntry: Codable, Equatable {
-        let value: String
+        var value: String
         var replaceWith: String
+        var fontName: String? = nil
+        var fontSize: Double? = nil
+        var widthPercent: Double? = nil
+        var justification: String? = nil
     }
 
     private struct MaskValuesExportV2: Codable {
@@ -102,6 +106,14 @@ final class MaskerModel: ObservableObject {
     private static let maskValuesByPDFPathKey = "maskValuesByPDFPath"
     private static let maskReplacementsByPDFPathKey = "maskReplacementsByPDFPath"
     private static let maximumRecentPDFs = 10
+    static let replacementFonts: [(name: String, label: String)] = [
+        ("Helvetica-Bold", "Helvetica Bold"),
+        ("Helvetica", "Helvetica"),
+        ("Times-Bold", "Times Bold"),
+        ("Times-Roman", "Times"),
+        ("Courier-Bold", "Courier Bold"),
+        ("Courier", "Courier")
+    ]
 
     private let userDefaults: UserDefaults
 
@@ -237,7 +249,9 @@ final class MaskerModel: ObservableObject {
         var masks = values.compactMap { value -> MaskValueEntry? in
             let key = PDFMasker.normalizedReplacementKey(for: value)
             guard !key.isEmpty, seen.insert(key).inserted else { return nil }
-            return MaskValueEntry(value: value, replaceWith: storedEntries[key]?.replaceWith ?? "")
+            var entry = storedEntries[key] ?? MaskValueEntry(value: value, replaceWith: "")
+            entry.value = value
+            return entry
         }
         masks.append(contentsOf: storedEntries.values
             .filter { seen.insert(PDFMasker.normalizedReplacementKey(for: $0.value)).inserted }
@@ -314,7 +328,11 @@ final class MaskerModel: ObservableObject {
             guard !value.isEmpty, seen.insert(key).inserted else { return nil }
             return MaskValueEntry(
                 value: value,
-                replaceWith: raw.replaceWith.trimmingCharacters(in: .whitespacesAndNewlines)
+                replaceWith: raw.replaceWith.trimmingCharacters(in: .whitespacesAndNewlines),
+                fontName: normalizedReplacementFont(raw.fontName),
+                fontSize: raw.fontSize.map { min(max($0, 4), 24) },
+                widthPercent: raw.widthPercent.map { min(max($0, 35), 100) },
+                justification: ReplacementLabelAlignment(rawValue: raw.justification ?? "")?.rawValue
             )
         }
         guard !entries.isEmpty else { throw MaskValuesImportError.noValues }
@@ -494,6 +512,7 @@ final class MaskerModel: ObservableObject {
         let inputFiles = files
         let reviewedMatches = matches
         let replacements = replacementsByValue
+        let replacementStyles = replacementStylesByValue
         isBusy = true
         status = "Preparing sanitized copies..."
 
@@ -503,7 +522,8 @@ final class MaskerModel: ObservableObject {
                     files: inputFiles,
                     matches: reviewedMatches,
                     outputFolder: folder,
-                    replacementsByValue: replacements
+                    replacementsByValue: replacements,
+                    replacementStylesByValue: replacementStyles
                 ) { message in
                     DispatchQueue.main.async { self.status = message }
                 }
@@ -525,8 +545,28 @@ final class MaskerModel: ObservableObject {
         for index in matches.indices { matches[index].isSelected = selected }
     }
 
+    func matchIsSelected(_ id: UUID) -> Bool {
+        matches.first(where: { $0.id == id })?.isSelected ?? false
+    }
+
+    func setMatchSelected(_ selected: Bool, id: UUID) {
+        guard let index = matches.firstIndex(where: { $0.id == id }) else { return }
+        matches[index].isSelected = selected
+    }
+
     var replacementsByValue: [String: String] {
         replacementEntriesByKey.mapValues(\.replaceWith)
+    }
+
+    var replacementStylesByValue: [String: ReplacementLabelStyle] {
+        replacementEntriesByKey.mapValues { entry in
+            ReplacementLabelStyle(
+                fontName: normalizedReplacementFont(entry.fontName) ?? "Helvetica-Bold",
+                fontSize: entry.fontSize.map { CGFloat($0) },
+                widthFraction: CGFloat((entry.widthPercent ?? 100) / 100),
+                alignment: ReplacementLabelAlignment(rawValue: entry.justification ?? "") ?? .center
+            ).normalized
+        }
     }
 
     func replacementText(for value: String) -> String {
@@ -540,9 +580,70 @@ final class MaskerModel: ObservableObject {
         if label.isEmpty {
             replacementEntriesByKey.removeValue(forKey: key)
         } else {
-            replacementEntriesByKey[key] = MaskValueEntry(value: value, replaceWith: label)
+            var entry = replacementEntriesByKey[key] ?? MaskValueEntry(value: value, replaceWith: label)
+            entry.value = value
+            entry.replaceWith = label
+            replacementEntriesByKey[key] = entry
         }
         stashMaskValuesForLoadedFiles()
+    }
+
+    func replacementFontName(for value: String) -> String {
+        normalizedReplacementFont(
+            replacementEntriesByKey[PDFMasker.normalizedReplacementKey(for: value)]?.fontName
+        ) ?? "Helvetica-Bold"
+    }
+
+    func replacementFontSize(for value: String) -> Double {
+        replacementEntriesByKey[PDFMasker.normalizedReplacementKey(for: value)]?.fontSize ?? 0
+    }
+
+    func replacementWidthPercent(for value: String) -> Double {
+        replacementEntriesByKey[PDFMasker.normalizedReplacementKey(for: value)]?.widthPercent ?? 100
+    }
+
+    func replacementJustification(for value: String) -> String {
+        let raw = replacementEntriesByKey[
+            PDFMasker.normalizedReplacementKey(for: value)
+        ]?.justification ?? ""
+        return ReplacementLabelAlignment(rawValue: raw)?.rawValue ?? ReplacementLabelAlignment.center.rawValue
+    }
+
+    func setReplacementFontName(_ fontName: String, for value: String) {
+        updateReplacementEntry(for: value) { $0.fontName = normalizedReplacementFont(fontName) }
+    }
+
+    func setReplacementFontSize(_ fontSize: Double, for value: String) {
+        updateReplacementEntry(for: value) {
+            $0.fontSize = fontSize == 0 ? nil : min(max(fontSize, 4), 24)
+        }
+    }
+
+    func setReplacementWidthPercent(_ widthPercent: Double, for value: String) {
+        updateReplacementEntry(for: value) { $0.widthPercent = min(max(widthPercent, 35), 100) }
+    }
+
+    func setReplacementJustification(_ justification: String, for value: String) {
+        updateReplacementEntry(for: value) {
+            $0.justification = ReplacementLabelAlignment(rawValue: justification)?.rawValue
+        }
+    }
+
+    private func updateReplacementEntry(
+        for value: String,
+        update: (inout MaskValueEntry) -> Void
+    ) {
+        let key = PDFMasker.normalizedReplacementKey(for: value)
+        guard !key.isEmpty, var entry = replacementEntriesByKey[key], !entry.replaceWith.isEmpty else { return }
+        update(&entry)
+        replacementEntriesByKey[key] = entry
+        stashMaskValuesForLoadedFiles()
+    }
+
+    private func normalizedReplacementFont(_ fontName: String?) -> String? {
+        guard let fontName,
+              Self.replacementFonts.contains(where: { $0.name == fontName }) else { return nil }
+        return fontName
     }
 
     func selectCurrentPage(_ selected: Bool) {
@@ -642,6 +743,12 @@ struct ContentView: View {
     }
 
     private var displayedVersion: String {
+#if SNAPSHOT_TEST
+        if let snapshotVersion = ProcessInfo.processInfo.environment["MASKER_SNAPSHOT_VERSION"],
+           !snapshotVersion.isEmpty {
+            return snapshotVersion
+        }
+#endif
         let info = Bundle.main.infoDictionary
         let version = info?["CFBundleShortVersionString"] as? String ?? "dev"
         let build = info?["CFBundleVersion"] as? String
@@ -951,7 +1058,7 @@ struct ContentView: View {
                 HStack(spacing: 10) {
                     Text("Matches on page \(model.currentPreviewPage + 1)")
                         .font(.callout.weight(.semibold))
-                    Text("\(currentMatchIndices.count)")
+                    Text("\(currentMatches.count)")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 7)
@@ -962,9 +1069,9 @@ struct ContentView: View {
                         Toggle("Reveal values", isOn: $model.revealDetectedValues)
                             .toggleStyle(.checkbox)
                         Button("Page: All") { model.selectCurrentPage(true) }
-                            .disabled(currentMatchIndices.isEmpty)
+                            .disabled(currentMatches.isEmpty)
                         Button("Page: None") { model.selectCurrentPage(false) }
-                            .disabled(currentMatchIndices.isEmpty)
+                            .disabled(currentMatches.isEmpty)
                     }
                 }
                 .padding(.horizontal, 14)
@@ -975,7 +1082,7 @@ struct ContentView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(spacing: 0) {
-                            if currentMatchIndices.isEmpty {
+                            if currentMatches.isEmpty {
                                 HStack {
                                     Image(systemName: model.matches.isEmpty ? "magnifyingglass" : "checkmark.circle")
                                         .foregroundStyle(.secondary)
@@ -986,18 +1093,24 @@ struct ContentView: View {
                                 }
                                 .padding(14)
                             } else {
-                                ForEach(currentMatchIndices, id: \.self) { index in
-                                    let matchID = model.matches[index].id
+                                ForEach(currentMatches) { match in
+                                    let matchID = match.id
                                     HStack(spacing: 10) {
                                         RoundedRectangle(cornerRadius: 2)
                                             .fill(model.selectedMatchID == matchID ? Color.accentColor : Color.clear)
                                             .frame(width: 3)
-                                        Toggle("", isOn: $model.matches[index].isSelected)
+                                        Toggle(
+                                            "",
+                                            isOn: Binding(
+                                                get: { model.matchIsSelected(matchID) },
+                                                set: { model.setMatchSelected($0, id: matchID) }
+                                            )
+                                        )
                                             .labelsHidden()
                                         VStack(alignment: .leading, spacing: 3) {
-                                            Text(model.matches[index].category)
+                                            Text(match.category)
                                                 .font(.callout.weight(.semibold))
-                                            Text(model.matches[index].matchedText)
+                                            Text(match.matchedText)
                                                 .font(.system(.callout, design: .monospaced))
                                                 .lineLimit(1)
                                                 .redacted(reason: model.revealDetectedValues ? [] : .privacy)
@@ -1006,14 +1119,68 @@ struct ContentView: View {
                                         TextField(
                                             "Replace with",
                                             text: Binding(
-                                                get: { model.replacementText(for: model.matches[index].matchedText) },
-                                                set: { model.setReplacementText($0, for: model.matches[index].matchedText) }
+                                                get: { model.replacementText(for: match.matchedText) },
+                                                set: { model.setReplacementText($0, for: match.matchedText) }
                                             )
                                         )
                                         .textFieldStyle(.roundedBorder)
                                         .controlSize(.small)
                                         .frame(width: 112)
                                         .help("Optional label rendered inside the black mask")
+                                        Menu {
+                                            Picker(
+                                                "Font",
+                                                selection: Binding(
+                                                    get: { model.replacementFontName(for: match.matchedText) },
+                                                    set: { model.setReplacementFontName($0, for: match.matchedText) }
+                                                )
+                                            ) {
+                                                ForEach(Array(MaskerModel.replacementFonts.enumerated()), id: \.offset) { _, font in
+                                                    Text(font.label).tag(font.name)
+                                                }
+                                            }
+                                            Picker(
+                                                "Maximum size",
+                                                selection: Binding(
+                                                    get: { model.replacementFontSize(for: match.matchedText) },
+                                                    set: { model.setReplacementFontSize($0, for: match.matchedText) }
+                                                )
+                                            ) {
+                                                Text("Auto").tag(0.0)
+                                                ForEach([6.0, 8.0, 10.0, 12.0, 16.0], id: \.self) { size in
+                                                    Text("\(Int(size)) pt").tag(size)
+                                                }
+                                            }
+                                            Picker(
+                                                "Label width",
+                                                selection: Binding(
+                                                    get: { model.replacementWidthPercent(for: match.matchedText) },
+                                                    set: { model.setReplacementWidthPercent($0, for: match.matchedText) }
+                                                )
+                                            ) {
+                                                ForEach([50.0, 75.0, 100.0], id: \.self) { width in
+                                                    Text("\(Int(width))%").tag(width)
+                                                }
+                                            }
+                                            Picker(
+                                                "Alignment",
+                                                selection: Binding(
+                                                    get: { model.replacementJustification(for: match.matchedText) },
+                                                    set: { model.setReplacementJustification($0, for: match.matchedText) }
+                                                )
+                                            ) {
+                                                Label("Left", systemImage: "text.alignleft").tag(ReplacementLabelAlignment.left.rawValue)
+                                                Label("Center", systemImage: "text.aligncenter").tag(ReplacementLabelAlignment.center.rawValue)
+                                                Label("Right", systemImage: "text.alignright").tag(ReplacementLabelAlignment.right.rawValue)
+                                            }
+                                        } label: {
+                                            Image(systemName: "textformat")
+                                        }
+                                        .menuStyle(.borderlessButton)
+                                        .menuIndicator(.hidden)
+                                        .fixedSize()
+                                        .disabled(model.replacementText(for: match.matchedText).isEmpty)
+                                        .help("Label font, maximum size, width, and alignment")
                                     }
                                     .padding(.horizontal, 11)
                                     .padding(.vertical, 7)
@@ -1094,6 +1261,7 @@ struct ContentView: View {
                         fileURL: activeFile,
                         matches: model.matches.filter { $0.fileURL.standardizedFileURL == activeFile.standardizedFileURL },
                         replacementsByValue: model.replacementsByValue,
+                        replacementStylesByValue: model.replacementStylesByValue,
                         currentPage: $model.currentPreviewPage,
                         selectedMatchID: $model.selectedMatchID,
                         searchText: model.pdfSearchText,
@@ -1143,11 +1311,11 @@ struct ContentView: View {
         }
     }
 
-    private var currentMatchIndices: [Int] {
+    private var currentMatches: [RedactionMatch] {
         guard let file = model.activeFileURL else { return [] }
-        return model.matches.indices.filter {
-            model.matches[$0].fileURL.standardizedFileURL == file.standardizedFileURL &&
-            model.matches[$0].pageIndex == model.currentPreviewPage
+        return model.matches.filter {
+            $0.fileURL.standardizedFileURL == file.standardizedFileURL &&
+            $0.pageIndex == model.currentPreviewPage
         }
     }
 
@@ -1222,10 +1390,53 @@ final class MaskPDFView: PDFView {
 typealias MaskPDFView = PDFView
 #endif
 
+private final class MaskLabelPreviewAnnotation: PDFAnnotation {
+    private let label: String
+    private let rotationDegrees: Int
+    private let labelStyle: ReplacementLabelStyle
+
+    init(
+        bounds: CGRect,
+        label: String,
+        rotationDegrees: Int,
+        style: ReplacementLabelStyle
+    ) {
+        self.label = label
+        self.rotationDegrees = rotationDegrees
+        self.labelStyle = style
+        super.init(bounds: bounds, forType: .stamp, withProperties: nil)
+        shouldDisplay = true
+        shouldPrint = true
+        color = .clear
+        interiorColor = .clear
+        let clearBorder = PDFBorder()
+        clearBorder.lineWidth = 0
+        border = clearBorder
+    }
+
+    required init?(coder: NSCoder) {
+        label = ""
+        rotationDegrees = 0
+        labelStyle = .standard
+        super.init(coder: coder)
+    }
+
+    override func draw(with box: PDFDisplayBox, in context: CGContext) {
+        PDFMasker.drawReplacementLabel(
+            label,
+            in: bounds,
+            context: context,
+            rotationDegrees: rotationDegrees,
+            style: labelStyle
+        )
+    }
+}
+
 struct ContinuousPDFView: NSViewRepresentable {
     let fileURL: URL
     let matches: [RedactionMatch]
     let replacementsByValue: [String: String]
+    let replacementStylesByValue: [String: ReplacementLabelStyle]
     @Binding var currentPage: Int
     @Binding var selectedMatchID: UUID?
     let searchText: String
@@ -1258,6 +1469,7 @@ struct ContinuousPDFView: NSViewRepresentable {
             fileURL: fileURL,
             matches: matches,
             replacementsByValue: replacementsByValue,
+            replacementStylesByValue: replacementStylesByValue,
             requestedPage: currentPage
         )
         context.coordinator.updateSearchIfNeeded(searchText)
@@ -1348,6 +1560,7 @@ struct ContinuousPDFView: NSViewRepresentable {
             fileURL: URL,
             matches: [RedactionMatch],
             replacementsByValue: [String: String],
+            replacementStylesByValue: [String: ReplacementLabelStyle],
             requestedPage: Int
         ) {
             guard let pdfView else { return }
@@ -1359,7 +1572,13 @@ struct ContinuousPDFView: NSViewRepresentable {
                 .sorted { $0.key < $1.key }
                 .map { "\($0.key)=\($0.value)" }
                 .joined(separator: "|")
-            let signature = filePath + "|" + matchPart + "|" + replacementPart
+            let stylePart = replacementStylesByValue
+                .sorted { $0.key < $1.key }
+                .map { key, style in
+                    "\(key)=\(style.fontName),\(style.fontSize ?? 0),\(style.widthFraction),\(style.alignment.rawValue)"
+                }
+                .joined(separator: "|")
+            let signature = filePath + "|" + matchPart + "|" + replacementPart + "|" + stylePart
 
             if signature != documentSignature {
                 previewMasks = [:]
@@ -1372,6 +1591,7 @@ struct ContinuousPDFView: NSViewRepresentable {
                 addRedactionAnnotations(
                     matches.filter(\.isSelected),
                     replacementsByValue: replacementsByValue,
+                    replacementStylesByValue: replacementStylesByValue,
                     to: document
                 )
                 documentSignature = signature
@@ -1491,6 +1711,7 @@ struct ContinuousPDFView: NSViewRepresentable {
                         detectPhone: false,
                         generateNameVariants: false
                     ),
+                    matchExactWordBoundaries: false,
                     shouldCancel: { cancellation.isCancelled },
                     progress: { message in
                         let label: String
@@ -1565,6 +1786,7 @@ struct ContinuousPDFView: NSViewRepresentable {
         private func addRedactionAnnotations(
             _ matches: [RedactionMatch],
             replacementsByValue: [String: String],
+            replacementStylesByValue: [String: ReplacementLabelStyle],
             to document: PDFDocument
         ) {
             for match in matches {
@@ -1576,8 +1798,18 @@ struct ContinuousPDFView: NSViewRepresentable {
                     for: match.matchedText,
                     replacementsByValue: replacementsByValue
                 )
+                let labelStyle = PDFMasker.replacementStyle(
+                    for: match.matchedText,
+                    replacementStylesByValue: replacementStylesByValue
+                )
                 let labelIndex = label.flatMap { _ in
-                    pageRects.indices.max { pageRects[$0].width < pageRects[$1].width }
+                    pageRects.indices.max {
+                        let firstLength = match.textRotationDegrees % 180 == 0
+                            ? pageRects[$0].width : pageRects[$0].height
+                        let secondLength = match.textRotationDegrees % 180 == 0
+                            ? pageRects[$1].width : pageRects[$1].height
+                        return firstLength < secondLength
+                    }
                 }
                 for (index, pageRect) in pageRects.enumerated() {
                     let replacementText = index == labelIndex ? label : nil
@@ -1595,25 +1827,13 @@ struct ContinuousPDFView: NSViewRepresentable {
                     mask.border = maskBorder
                     page.addAnnotation(mask)
                     if let replacementText {
-                        let labelAnnotation = PDFAnnotation(
+                        let pageRotation = ((page.rotation % 360) + 360) % 360
+                        let labelAnnotation = MaskLabelPreviewAnnotation(
                             bounds: pageRect.insetBy(dx: 1, dy: 1),
-                            forType: .freeText,
-                            withProperties: nil
+                            label: replacementText,
+                            rotationDegrees: match.textRotationDegrees - pageRotation,
+                            style: labelStyle
                         )
-                        labelAnnotation.contents = replacementText
-                        labelAnnotation.font = NSFont(
-                            name: "Helvetica-Bold",
-                            size: min(10, max(5, pageRect.height * 0.42))
-                        )
-                        labelAnnotation.fontColor = .white
-                        labelAnnotation.alignment = .center
-                        labelAnnotation.color = .clear
-                        labelAnnotation.interiorColor = .clear
-                        labelAnnotation.shouldDisplay = true
-                        labelAnnotation.shouldPrint = true
-                        let labelBorder = PDFBorder()
-                        labelBorder.lineWidth = 0
-                        labelAnnotation.border = labelBorder
                         page.addAnnotation(labelAnnotation)
                     }
                 }

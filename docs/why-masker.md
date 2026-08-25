@@ -1,21 +1,28 @@
 # I built a local PDF redactor because Preview made me click too much
 
-I needed to share a pile of financial documents with a tax strategist and had a predictable problem: the same names, addresses, SSNs, and account numbers appeared over and over.
+I needed to share financial documents with a tax strategist. Preview can redact PDFs, but selecting the same names, addresses, tax IDs, and account numbers on every page got old quickly.
 
-Preview on macOS has a real redaction tool, but I still had to find and select every occurrence by hand. I wanted the computer to do the repetitive search while leaving the final decision to me.
+So I built [Masker](https://github.com/cpatil/masker), a native macOS app for reviewing and permanently masking repeated values. It runs locally with PDFKit and Apple's on-device OCR. There is no account, server, or upload.
 
-That became [Masker](https://github.com/cpatil/masker), a small native macOS app. You add PDFs, enter values to remove, review every suggested mask, and export sanitized copies. Everything runs locally using PDFKit and Apple's Vision OCR. There is no account, server, or upload.
+![Masker reviewing masks in the generated Joe Farmer tax return](joe-farmer-overview.png)
 
-Masker was vibe-coded with Codex. The process was simple: describe the next piece, try it on the documents in front of me, find what broke, and turn that failure into a test.
+Masker can:
 
-PDFs supplied plenty of failures. `FORM 8879` looked like an account number. Account suffixes appeared in a different text order from the table visible on the page. An 89-page image-only PDF made incremental search feel endless because each keystroke restarted OCR.
+- Match exact values case-insensitively and on word boundaries.
+- Prefer the longest match when values overlap.
+- Find SSNs, EINs, emails, phone numbers, and account suffixes.
+- Keep institution names visible while masking only account identifiers.
+- Search incrementally for anything the automatic scan missed.
+- Review a continuously scrolling PDF and jump between masks and their rows.
+- Use black boxes or optional replacement labels such as `Client-1`.
+- Save recent PDFs and export reusable values and labels as JSON.
 
-Those cases shaped the app. Form numbers and years are excluded from account matching. Page geometry lets Masker cover an account suffix while keeping the institution name and amount visible. OCR is cached, stale searches are cancelled, and search results omit text that is already masked.
+![Incremental search finding an unmasked name in the Joe Farmer fixture](joe-farmer-search.png)
 
-The useful context turned out to be around the sensitive value. A tax strategist needs to know that a row belongs to a particular institution, just not the account number. Masker's account detector masks only the numeric suffix and leaves the institution name and amount visible. A mask can also carry a short replacement such as `Client` or `Account 1`; repeated values reuse the same label. During review, clicking any mask jumps to and highlights the corresponding match in the list, where I can reveal, relabel, or deselect it.
+![Replacement labels rendered inside masks for two distinct people](joe-farmer-labels.png)
 
-The test suite generates its own searchable, scanned, and rotated PDFs. It covers formatted and compact identifiers, shortened names such as `JOE AND MARY FARMER` to `Joe Farmer`, portable value-to-label JSON, multiple accounts at one institution, institution rows, false positives, and click-to-review selection. After export, it opens the sanitized PDF again and searches it using both text extraction and OCR. The test fails if a selected value is still recoverable.
+Exported pages are rebuilt from sanitized pixels at 300 DPI. The original text layer, forms, annotations, attachments, scripts, and metadata are not copied.
 
-Export is intentionally blunt: each page is rebuilt from sanitized pixels at 300 DPI with selected values replaced by black pixels. Optional labels are drawn into those pixels, not added as live PDF text. The result contains no original text layer, forms, annotations, or metadata. It is larger than the source. Preview may still make visible text searchable using its own OCR, but the masked values are no longer present in the page image for OCR to recover.
+This was vibe-coded with Codex. The tests use generated PDFs, including the fake Joe Farmer return shown above. They cover searchable and scanned documents, rotated pages, overlapping matches, account suffixes, labels, JSON import/export, and rescan behavior. The exported PDF is checked again with text extraction and OCR to make sure selected values are gone.
 
-Masker solved the problem I built it for. The source and a universal Apple Silicon/Intel build are available on [GitHub](https://github.com/cpatil/masker/releases/latest).
+Masker is open source, with a universal Apple Silicon/Intel build available on [GitHub](https://github.com/cpatil/masker/releases/latest).

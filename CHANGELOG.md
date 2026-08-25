@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.6.1 - 2026-08-24
+
+- Fixes an Add & Rescan crash caused by review-row bindings retaining stale numeric indexes after the match array was cleared.
+- Uses stable match IDs for selection, labels, and appearance controls so the complete result set can be safely replaced during a rescan.
+
+## 1.6.0 - 2026-08-24
+
+- Automatically follows the orientation of each matched text run when drawing a replacement label, including rotated pages.
+- Adds compact per-label controls for font family, maximum point size, text-frame width, and left/center/right alignment.
+- Carries label appearance in the portable value-to-label JSON mapping without adding page numbers or coordinates.
+- Keeps the underlying black mask unchanged; label width only changes text layout inside the mask.
+- Applies outer word boundaries to exact values and name variants, so a value such as `PATI` does not mask part of `Participation`.
+
 ## 1.5.1 - 2026-08-24
 
 - Prefers the longest value when detected matches overlap, independent of the order values were entered.

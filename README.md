@@ -14,7 +14,7 @@ Read the short development story: [I vibe-coded a PDF redactor because I needed 
 
 ## Features
 
-- Exact-value matching across one or more PDFs.
+- Case-insensitive exact-value matching across one or more PDFs, with outer word boundaries to prevent partial-word masks.
 - Longest-match preference for overlapping values, while retaining separate standalone occurrences.
 - SSN/ITIN, EIN, email, and US phone detection.
 - Compact nine-digit variants when a formatted SSN/ITIN or EIN is found.
@@ -25,6 +25,7 @@ Read the short development story: [I vibe-coded a PDF redactor because I needed 
 - A local Recent PDFs list that restores each PDF's saved mask values and optional replacement labels, and can import or export them as portable JSON.
 - Continuous-scroll review with matches synchronized to the visible page; clicking a black mask selects and scrolls to its review row.
 - An optional **Replace with** field for each value. Repeated case-insensitive values share one label, which is burned into the black mask as non-searchable pixels.
+- Automatic per-match label orientation plus portable controls for font, maximum size, text-frame width, and alignment.
 - Permanent export that removes the original text layer, forms, annotations, attachments, scripts, layers, and metadata.
 
 ## Try it
@@ -55,7 +56,7 @@ Maintainers can create the universal release archive with `./package-release.sh`
 3. Enable any additional detectors you want.
 4. Click **Scan PDFs Locally**.
 5. Scroll through the PDF and uncheck anything that should remain visible.
-6. Optionally type a short label such as `Client` or `Account 1` beside a match. Leave it empty for a plain black mask.
+6. Optionally type a short label such as `Client` or `Account 1` beside a match. Use the adjacent text-style menu to adjust font, maximum size, width, and alignment. Leave the label empty for a plain black mask.
 7. Search for possible variants; use **Add & Rescan** when you find another value to remove.
 8. Click **Create Sanitized Copies**.
 
@@ -67,7 +68,7 @@ Each exported page is rebuilt from sanitized pixels at 300 DPI using Core Graphi
 
 This intentionally removes the searchable and editable text layer. Replacement labels are rendered into the sanitized page image rather than added as PDF text. Preview and other apps may still use OCR to search text that remains visibly rendered on the page; masked values are removed from those pixels. Rasterization also increases file size compared with object-level redaction.
 
-Mask-value exports use a portable value-to-label mapping. They do not contain page numbers, coordinates, or the source file path, so the same JSON can be imported for another PDF. A value is matched case-insensitively; identical values use the same label everywhere. Version 1 exports from older Masker releases still import as black-only masks.
+Mask-value exports use a portable value-to-label mapping, including optional label appearance. They do not contain page numbers, coordinates, orientation, or the source file path, so the same JSON can be imported for another PDF. Label orientation is inferred again from each occurrence. A value is matched case-insensitively; identical values use the same label everywhere. Version 1 exports from older Masker releases still import as black-only masks.
 
 ## Privacy and limitations
 
