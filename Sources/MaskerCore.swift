@@ -223,6 +223,7 @@ enum PDFMasker {
         outputFolder: URL,
         replacementsByValue: [String: String] = [:],
         replacementStylesByValue: [String: ReplacementLabelStyle] = [:],
+        includeUnmatchedFiles: Bool = false,
         dpi: CGFloat = 300,
         progress: @escaping (String) -> Void
     ) throws -> [URL] {
@@ -233,7 +234,13 @@ enum PDFMasker {
             let fileMatches = matches.filter {
                 $0.fileURL.standardizedFileURL == fileURL.standardizedFileURL && $0.isSelected
             }
-            guard !fileMatches.isEmpty else { continue }
+            if fileMatches.isEmpty {
+                guard includeUnmatchedFiles else { continue }
+                let outputURL = uniqueOutputURL(for: fileURL, in: outputFolder)
+                try FileManager.default.copyItem(at: fileURL, to: outputURL)
+                outputs.append(outputURL)
+                continue
+            }
             guard let document = PDFDocument(url: fileURL) else { throw MaskerError.cannotOpen(fileURL) }
 
             let outputURL = uniqueOutputURL(for: fileURL, in: outputFolder)

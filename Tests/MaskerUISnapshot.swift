@@ -11,12 +11,12 @@ struct MaskerUISnapshot {
         }
         let input = URL(fileURLWithPath: CommandLine.arguments[1])
         let output = URL(fileURLWithPath: CommandLine.arguments[2])
-        let privateStore = output.deletingLastPathComponent()
-            .appendingPathComponent("private-batch-store-\(UUID().uuidString)", isDirectory: true)
-        setenv("MASKER_PRIVATE_BATCH_DIRECTORY", privateStore.path, 1)
+        let workflowStore = output.deletingLastPathComponent()
+            .appendingPathComponent("workflow-store-\(UUID().uuidString)", isDirectory: true)
+        setenv("MASKER_WORKFLOW_DIRECTORY", workflowStore.path, 1)
         defer {
-            unsetenv("MASKER_PRIVATE_BATCH_DIRECTORY")
-            try? FileManager.default.removeItem(at: privateStore)
+            unsetenv("MASKER_WORKFLOW_DIRECTORY")
+            try? FileManager.default.removeItem(at: workflowStore)
         }
 
         let matches = PDFMasker.scan(
@@ -108,6 +108,7 @@ struct MaskerUISnapshot {
         precondition(exportedValues?["format"] as? String == "masker-mask-set", "Generic mask-set export format is missing")
         precondition(exportedValues?["version"] as? Int == 1, "Mask-set export did not use schema v1")
         precondition(exportedValues?["pdfFileName"] == nil, "Generic mask-set export must not contain a PDF filename")
+        precondition(exportedValues?["settings"] as? [String: Any] != nil, "Mask-set export did not include detector settings")
         let exportedMasks = exportedValues?["masks"] as? [[String: Any]]
         precondition(exportedMasks?.count == 2, "Mask-set export did not include two values")
         precondition(
@@ -264,64 +265,79 @@ struct MaskerUISnapshot {
         let clearedModel = MaskerModel(userDefaults: testDefaults)
         precondition(clearedModel.recentFiles.isEmpty, "Clear did not remove recent PDFs")
         precondition(clearedModel.stashedValueCount(for: input) == 0, "Clear did not remove saved mask values")
-        let batchFolder = output.deletingLastPathComponent()
-            .appendingPathComponent("private-batch-fixture-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: batchFolder, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: batchFolder) }
+        let workflowFolder = output.deletingLastPathComponent()
+            .appendingPathComponent("workflow-fixture-\(UUID().uuidString)", isDirectory: true)
+        let nestedFolder = workflowFolder.appendingPathComponent("nested/tax", isDirectory: true)
+        try FileManager.default.createDirectory(at: nestedFolder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workflowFolder) }
         try FileManager.default.copyItem(
             at: input,
-            to: batchFolder.appendingPathComponent("first-generated-document.pdf")
+            to: workflowFolder.appendingPathComponent("first-generated-document.pdf")
         )
         try FileManager.default.copyItem(
             at: input,
-            to: batchFolder.appendingPathComponent("second-generated-document.pdf")
+            to: nestedFolder.appendingPathComponent("second-generated-document.pdf")
         )
-        let batchModel = MaskerModel(userDefaults: testDefaults)
-        batchModel.startPrivateBatch(in: batchFolder)
-        precondition(batchModel.privateBatchSession?.documents.count == 2, "Private batch did not enumerate two PDFs")
-        precondition(batchModel.recentFiles.isEmpty, "Private batch leaked documents into Recents")
-        let customOutput = batchFolder.appendingPathComponent("Reviewed Output", isDirectory: true)
-        batchModel.setOutputFolder(customOutput)
-        let outputFolderAfterReload = try PrivateBatchStore.load()?.outputFolderPath
+        let workflowModel = MaskerModel(userDefaults: testDefaults)
+        workflowModel.exactValues = "Example Person"
+        workflowModel.startDiscovery(in: workflowFolder)
+        precondition(workflowModel.discoverySession?.documents.count == 2, "Discovery did not enumerate nested PDFs")
+        precondition(workflowModel.recentFiles.isEmpty, "Discovery leaked documents into Recents")
+        precondition(workflowModel.discoveryActiveDocumentIndex == 0, "Discovery did not open the first PDF")
+        workflowModel.openAdjacentDiscoveryDocument(offset: 1)
         precondition(
-            outputFolderAfterReload == customOutput.standardizedFileURL.path,
-            "Private-batch output folder was not persisted"
+            workflowModel.discoveryActiveDocumentIndex == 1,
+            "Discovery Next remained gated before scanning"
         )
-        batchModel.handleControlURL(URL(string: "masker://private-batch/open?document=document-002")!)
+        workflowModel.openAdjacentDiscoveryDocument(offset: -1)
+        workflowModel.exactValues += "\nJOE AND MARY FARMER"
+        workflowModel.stashMaskValuesForLoadedFiles()
+        let restoredDiscovery = try WorkflowStore.load()
         precondition(
-            batchModel.privateBatchActiveDocumentIndex == 0,
-            "MCP control skipped an unreviewed private-batch document"
+            restoredDiscovery?.masks.map(\.value).contains("JOE AND MARY FARMER") == true,
+            "Discovery did not persist newly added mask values"
         )
-        batchModel.exactValues = "Example Person"
-        batchModel.stashMaskValuesForLoadedFiles()
-        let firstVersion = batchModel.privateBatchSession?.maskSetVersion
-        batchModel.scan()
-        let firstScanDeadline = Date().addingTimeInterval(30)
-        while batchModel.isBusy, Date() < firstScanDeadline {
+        let reloadedWorkflowModel = MaskerModel(userDefaults: testDefaults)
+        precondition(reloadedWorkflowModel.discoverySession?.documents.count == 2, "Discovery did not reload after restart")
+        reloadedWorkflowModel.resumeDiscovery()
+        precondition(reloadedWorkflowModel.isDiscoveryDocumentLoaded, "Resume Discovery did not reopen the saved PDF")
+        precondition(
+            reloadedWorkflowModel.exactValues.split(whereSeparator: \.isNewline).map(String.init).contains("JOE AND MARY FARMER"),
+            "Resume Discovery did not restore the shared mask set"
+        )
+
+        let batchMaskSet = workflowFolder.appendingPathComponent("masker-mask-set.json")
+        try reloadedWorkflowModel.currentMaskSetJSON().write(to: batchMaskSet, options: .atomic)
+        let customOutput = workflowFolder.appendingPathComponent("Batch Output", isDirectory: true)
+        reloadedWorkflowModel.runBatchConvert(
+            inputFolder: workflowFolder,
+            maskSetURL: batchMaskSet,
+            outputFolder: customOutput
+        )
+        let batchDeadline = Date().addingTimeInterval(90)
+        while reloadedWorkflowModel.isBusy, Date() < batchDeadline {
             RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         }
-        precondition(batchModel.privateBatchCurrentIsScanned, "Private batch did not record its scan version")
-        batchModel.markCurrentPrivateBatchDocumentReviewed()
-        precondition(batchModel.privateBatchCurrentIsReviewed, "Private batch did not record first review")
-        batchModel.openAdjacentPrivateBatchDocument(offset: 1)
-        batchModel.exactValues += "\nJOE AND MARY FARMER"
-        batchModel.stashMaskValuesForLoadedFiles()
-        precondition(batchModel.privateBatchSession?.maskSetVersion != firstVersion, "Mask-set change did not advance its version")
-        batchModel.scan()
-        let secondScanDeadline = Date().addingTimeInterval(30)
-        while batchModel.isBusy, Date() < secondScanDeadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
-        }
-        batchModel.markCurrentPrivateBatchDocumentReviewed()
-        batchModel.beginPrivateBatchFinalPass()
-        precondition(batchModel.privateBatchSession?.phase == .finalReview, "Private batch did not enter final pass")
-        precondition(batchModel.privateBatchActiveDocumentIndex == 0, "Final pass did not restart at the first PDF")
-        let publicStatusData = try Data(contentsOf: PrivateBatchStore.publicStatusURL)
+        precondition(!reloadedWorkflowModel.isBusy, "Batch Convert did not finish")
+        precondition(reloadedWorkflowModel.batchConversionTotal == 2, "Batch Convert included its output folder or missed a nested PDF")
+        precondition(reloadedWorkflowModel.batchConversionProcessed == 2, "Batch Convert did not process every PDF")
+        precondition(reloadedWorkflowModel.batchConversionFailed == 0, "Batch Convert failed a generated PDF")
+        precondition(
+            FileManager.default.fileExists(atPath: customOutput.appendingPathComponent("first-generated-document_masked.pdf").path),
+            "Batch Convert did not create the root-level output"
+        )
+        precondition(
+            FileManager.default.fileExists(
+                atPath: customOutput.appendingPathComponent("nested/tax/second-generated-document_masked.pdf").path
+            ),
+            "Batch Convert did not preserve the nested output hierarchy"
+        )
+        let publicStatusData = try Data(contentsOf: WorkflowStore.publicStatusURL)
         let publicStatusText = String(decoding: publicStatusData, as: UTF8.self)
-        precondition(!publicStatusText.contains(batchFolder.path), "MCP status leaked the private folder path")
+        precondition(!publicStatusText.contains(workflowFolder.path), "MCP status leaked the workflow folder path")
         precondition(!publicStatusText.contains("Example Person"), "MCP status leaked a mask value")
         precondition(!publicStatusText.contains("first-generated-document"), "MCP status leaked a filename")
-        FileHandle.standardError.write(Data("PASS privateBatchWorkflowAndPrivacy\n".utf8))
+        FileHandle.standardError.write(Data("PASS discoveryAndBatchConversion\n".utf8))
         FileHandle.standardError.write(Data("PASS uiSnapshot=\(output.path) matches=\(matches.count)\n".utf8))
     }
 

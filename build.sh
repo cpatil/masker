@@ -22,7 +22,7 @@ swiftc \
   -framework SwiftUI \
   -framework UniformTypeIdentifiers \
   -framework Vision \
-  "$project_dir/Sources/PrivateBatch.swift" \
+  "$project_dir/Sources/Workflows.swift" \
   "$project_dir/Sources/MaskerCore.swift" \
   "$project_dir/Sources/MaskerApp.swift" \
   -o "$contents_dir/MacOS/Masker"

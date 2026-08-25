@@ -13,26 +13,24 @@ const serverPath = join(here, '..', 'src', 'index.mjs');
 async function exercise(mode) {
   const store = await mkdtemp(join(tmpdir(), 'masker-mcp-protocol-'));
   const status = {
-    format: 'masker-mcp-status',
+    format: 'masker-workflow-status',
     version: 1,
     revision: 2,
     state: 'ready',
     sessionID: 'session-protocol-test',
-    phase: 'discovery',
+    workflow: 'discovery',
     documentCount: 1,
-    documents: [{ id: 'document-001', index: 1, state: 'unreviewed' }],
+    documents: [{ id: 'document-001', index: 1, state: 'active' }],
     activeDocumentID: 'document-001',
     activeDocumentIndex: 1,
-    maskSetVersion: 1,
-    reviewedCount: 0,
-    staleCount: 0,
-    exportedCount: 0,
-    currentReviewed: false,
+    visitedCount: 1,
+    processedCount: 0,
+    failedCount: 0,
     currentScanned: false,
     matchCount: null,
     selectedMatchCount: null,
     busy: false,
-    userActionRequired: 'scan_and_review_current_document'
+    userActionRequired: 'scan_or_open_next_document'
   };
   await writeFile(join(store, 'mcp-status.json'), JSON.stringify(status));
   const options = mode === 'modern'
@@ -42,15 +40,16 @@ async function exercise(mode) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [serverPath],
-    env: { ...process.env, MASKER_PRIVATE_BATCH_DIRECTORY: store }
+    env: { ...process.env, MASKER_WORKFLOW_DIRECTORY: store }
   });
   try {
     await client.connect(transport);
     assert.equal(client.getProtocolEra(), mode);
     const listed = await client.listTools();
-    assert.ok(listed.tools.some(tool => tool.name === 'get_private_batch_status'));
-    assert.ok(listed.tools.some(tool => tool.name === 'begin_private_batch'));
-    const result = await client.callTool({ name: 'get_private_batch_status', arguments: {} });
+    assert.ok(listed.tools.some(tool => tool.name === 'get_workflow_status'));
+    assert.ok(listed.tools.some(tool => tool.name === 'begin_discovery'));
+    assert.ok(listed.tools.some(tool => tool.name === 'begin_batch_convert'));
+    const result = await client.callTool({ name: 'get_workflow_status', arguments: {} });
     assert.equal(result.structuredContent.session_id, 'session-protocol-test');
     assert.equal(result.structuredContent.document_count, 1);
   } finally {

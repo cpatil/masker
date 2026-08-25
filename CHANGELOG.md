@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.8.0 - 2026-08-25
+
+- Replaces Private Batch and its review/final-pass gate with two separate workflows.
+- Adds **Discovery Mode**, which recursively walks a folder hierarchy and lets the user move freely between PDFs while building one mask set.
+- Adds **Batch Convert**, which applies a generic mask-set JSON to every PDF under a folder and mirrors the source hierarchy under `Masked PDFs`.
+- Includes detector settings in new mask-set exports while remaining compatible with existing schema v1 and legacy exports.
+- Updates the MCP companion around opaque discovery and batch-conversion status.
+
 ## 1.7.1 - 2026-08-25
 
 - Moves mask-set Import and Export into **Choose what to mask** instead of tying the actions to a recent PDF.

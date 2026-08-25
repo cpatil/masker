@@ -28,8 +28,9 @@ Read the short development story: [I vibe-coded a PDF redactor because I needed 
 - An optional **Replace with** field for each value. Repeated case-insensitive values share one label, which is burned into the black mask as non-searchable pixels.
 - Automatic per-match label orientation plus portable controls for font, maximum size, text-frame width, and alignment.
 - Permanent export that removes the original text layer, forms, annotations, attachments, scripts, layers, and metadata.
-- A private-batch workflow for building one reviewed mask set across a folder, followed by a fresh final pass over every document.
-- An optional MCP companion that lets Codex coordinate the batch using opaque IDs and counts without receiving document contents or identifying metadata.
+- Discovery Mode recursively walks PDFs under a folder while one shared mask set grows; navigation has no scan or review gate.
+- Batch Convert applies a mask-set JSON to every PDF under a folder and mirrors its subfolders under `Masked PDFs`.
+- An optional MCP companion lets Codex coordinate discovery and batch conversion using opaque IDs and counts without receiving document contents or identifying metadata.
 
 ## Try it
 
@@ -52,11 +53,13 @@ The build uses SwiftUI, PDFKit, Vision, and Core Graphics from macOS.
 
 Maintainers can create the universal release archive with `./package-release.sh`.
 
-## Private batches and MCP
+## Discovery, Batch Convert, and MCP
 
-Choose **Private Batch...** and select a folder of PDFs. During discovery, review each document locally and add any new values or labels to the shared mask set. A changed mask set makes earlier reviews stale. When discovery is complete, start **Final Pass**; every PDF must be rescanned, reviewed, and exported with the finished set.
+Choose **Discovery Mode...** and select a folder. Masker finds every PDF below it, including nested folders. Move back and forth freely while adding values and labels to the shared mask set, then export that set from section 2.
 
-The optional MCP companion lets Codex open Masker, advance between opaque document IDs, start local scans, and report workflow counts. It deliberately has no tool for reading filenames, paths, PDF text, mask values, labels, search results, or screenshots. Masker itself handles the PDFs and all human review.
+Choose **Batch Convert...**, select a folder, and select a mask-set JSON. Masker applies that set to every PDF below the folder. Separate outputs are written under `Masked PDFs`, with the original subfolder layout preserved. Source PDFs are never combined or overwritten.
+
+The optional MCP companion lets Codex open Masker, advance between opaque discovery IDs, start local scans, begin Batch Convert, and report counts. It has no tool for reading filenames, paths, PDF text, mask values, labels, search results, or screenshots. Masker handles the files and the user handles review.
 
 The native app still has no third-party dependencies. The MCP companion requires Node.js 20 or newer:
 
@@ -94,7 +97,7 @@ Mask-set exports use a portable value-to-label mapping, including optional label
 - Nothing in the app uploads documents, extracted text, or search terms.
 - Preview may make visible pixels searchable with on-device OCR even though the PDF contains no text layer. A masked value itself should not appear in those OCR results.
 - Recent file paths, exact mask values, and replacement labels are stored in local macOS preferences and can be cleared from the app.
-- Private-batch paths, values, labels, review decisions, and source fingerprints are stored only in a local owner-readable session file. The separate MCP status contains only opaque IDs, counts, versions, and workflow state.
+- Discovery paths, values, labels, and source fingerprints are stored only in a local owner-readable session file. The separate MCP status contains only opaque IDs, counts, and workflow state.
 - OCR and pattern matching can miss handwriting, unusual typography, separated digits, or poor scans.
 - Automatic detectors can produce false positives. Review every selected match and every output page before sharing.
 - Masker is a privacy tool, not a guarantee of regulatory compliance.
@@ -105,7 +108,7 @@ Mask-set exports use a portable value-to-label mapping, including optional label
 ./test.sh
 ```
 
-The self-test generates its own searchable, scanned, and rotated PDFs. It covers the `JOE AND MARY FARMER` to `Joe Farmer` name variant, identifier variants, institution suffixes, exceptions, cached OCR search, generic mask-set JSON, repeated file loading, merge behavior, pixel-rendered labels, click-to-review selection, private-batch persistence and status sanitization, permanent export, and residual-text checks. The MCP tests exercise both supported protocol eras and verify the status privacy boundary. No tax documents or private fixtures are stored in this repository.
+The self-test generates its own searchable, scanned, and rotated PDFs. It covers the `JOE AND MARY FARMER` to `Joe Farmer` name variant, identifier variants, institution suffixes, exceptions, cached OCR search, generic mask-set JSON, repeated file loading, merge behavior, pixel-rendered labels, click-to-review selection, recursive discovery, batch conversion, status sanitization, permanent export, and residual-text checks. The MCP tests exercise both supported protocol eras and verify the status privacy boundary. No tax documents or private fixtures are stored in this repository.
 
 An optional local-only corpus test is also available:
 

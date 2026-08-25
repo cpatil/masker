@@ -10,12 +10,7 @@ struct MaskValueEntry: Codable, Equatable {
     var justification: String? = nil
 }
 
-enum PrivateBatchPhase: String, Codable {
-    case discovery
-    case finalReview = "final_review"
-}
-
-struct PrivateBatchPatternSettings: Codable, Equatable {
+struct MaskPatternSettings: Codable, Equatable {
     var detectSSN = true
     var detectEIN = true
     var detectEmail = false
@@ -25,72 +20,66 @@ struct PrivateBatchPatternSettings: Codable, Equatable {
     var accountSuffixExceptions: [String] = []
 }
 
-struct PrivateBatchDocument: Codable, Equatable, Identifiable {
+struct DiscoveryDocument: Codable, Equatable, Identifiable {
     let id: String
     let path: String
     let sourceFingerprint: String
-    var discoveryReviewedVersion: Int?
-    var finalReviewedVersion: Int?
-    var exportedVersion: Int?
-    var excludedMatchFingerprints: [String]
 }
 
-struct PrivateBatchSession: Codable, Equatable {
+struct DiscoverySession: Codable, Equatable {
     let format: String
     let version: Int
     let id: String
-    let folderPath: String
-    var documents: [PrivateBatchDocument]
+    let rootFolderPath: String
+    var documents: [DiscoveryDocument]
     var activeDocumentID: String?
-    var maskSetVersion: Int
+    var visitedDocumentIDs: [String]
     var masks: [MaskValueEntry]
-    var settings: PrivateBatchPatternSettings
-    var outputFolderPath: String
-    var phase: PrivateBatchPhase
+    var settings: MaskPatternSettings
     var updatedAt: TimeInterval
 
-    static func create(folder: URL, documents: [PrivateBatchDocument]) -> PrivateBatchSession {
-        PrivateBatchSession(
-            format: "masker-private-batch",
+    static func create(
+        folder: URL,
+        documents: [DiscoveryDocument],
+        masks: [MaskValueEntry] = [],
+        settings: MaskPatternSettings = MaskPatternSettings()
+    ) -> DiscoverySession {
+        let firstID = documents.first?.id
+        return DiscoverySession(
+            format: "masker-discovery",
             version: 1,
-            id: "session-" + UUID().uuidString.lowercased(),
-            folderPath: folder.standardizedFileURL.path,
+            id: "discovery-" + UUID().uuidString.lowercased(),
+            rootFolderPath: folder.standardizedFileURL.path,
             documents: documents,
-            activeDocumentID: documents.first?.id,
-            maskSetVersion: 1,
-            masks: [],
-            settings: PrivateBatchPatternSettings(),
-            outputFolderPath: folder
-                .appendingPathComponent("Masked PDFs", isDirectory: true)
-                .standardizedFileURL.path,
-            phase: .discovery,
+            activeDocumentID: firstID,
+            visitedDocumentIDs: firstID.map { [$0] } ?? [],
+            masks: masks,
+            settings: settings,
             updatedAt: Date().timeIntervalSince1970
         )
     }
 }
 
-struct PrivateBatchPublicDocumentStatus: Codable, Equatable {
+struct WorkflowPublicDocumentStatus: Codable, Equatable {
     let id: String
     let index: Int
     let state: String
 }
 
-struct PrivateBatchPublicStatus: Codable, Equatable {
+struct WorkflowPublicStatus: Codable, Equatable {
     let format: String
     let version: Int
     let revision: Int
+    let workflow: String?
     let state: String
     let sessionID: String?
-    let phase: String?
     let documentCount: Int
-    let documents: [PrivateBatchPublicDocumentStatus]
+    let documents: [WorkflowPublicDocumentStatus]
     let activeDocumentID: String?
     let activeDocumentIndex: Int?
-    let maskSetVersion: Int?
-    let reviewedCount: Int
-    let staleCount: Int
-    let exportedCount: Int
-    let currentReviewed: Bool
+    let visitedCount: Int
+    let processedCount: Int
+    let failedCount: Int
     let currentScanned: Bool
     let matchCount: Int?
     let selectedMatchCount: Int?
@@ -98,7 +87,7 @@ struct PrivateBatchPublicStatus: Codable, Equatable {
     let userActionRequired: String?
 }
 
-enum PrivateBatchStoreError: LocalizedError {
+enum WorkflowStoreError: LocalizedError {
     case noPDFs
     case invalidSession
     case changedDocument(String)
@@ -106,22 +95,22 @@ enum PrivateBatchStoreError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .noPDFs:
-            return "That folder does not contain any PDF files."
+            return "That folder hierarchy does not contain any PDF files."
         case .invalidSession:
-            return "The saved private batch session is invalid."
+            return "The saved discovery session is invalid."
         case .changedDocument(let id):
-            return "\(id) changed after it was added to the private batch. Start a new batch to review it safely."
+            return "\(id) changed after discovery started. Start a new discovery session to review it safely."
         }
     }
 }
 
-enum PrivateBatchStore {
-    private static let directoryName = "Private Batch"
-    private static let sessionFileName = "active-session.json"
+enum WorkflowStore {
+    private static let directoryName = "Workflows"
+    private static let sessionFileName = "discovery-session.json"
     private static let publicStatusFileName = "mcp-status.json"
 
     static var directoryURL: URL {
-        if let override = ProcessInfo.processInfo.environment["MASKER_PRIVATE_BATCH_DIRECTORY"],
+        if let override = ProcessInfo.processInfo.environment["MASKER_WORKFLOW_DIRECTORY"],
            !override.isEmpty {
             return URL(fileURLWithPath: override, isDirectory: true).standardizedFileURL
         }
@@ -138,34 +127,57 @@ enum PrivateBatchStore {
         directoryURL.appendingPathComponent(publicStatusFileName)
     }
 
-    static func documents(in folder: URL) throws -> [PrivateBatchDocument] {
-        let keys: Set<URLResourceKey> = [.isRegularFileKey]
-        let urls = try FileManager.default.contentsOfDirectory(
-            at: folder,
+    static func documents(in folder: URL, excluding excludedFolder: URL? = nil) throws -> [DiscoveryDocument] {
+        let root = folder.standardizedFileURL
+        let excludedPath = excludedFolder?.standardizedFileURL.path
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isDirectoryKey, .isHiddenKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
             includingPropertiesForKeys: Array(keys),
-            options: [.skipsHiddenFiles]
-        )
-        let pdfs = urls.filter { url in
-            guard url.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame else { return false }
-            return (try? url.resourceValues(forKeys: keys).isRegularFile) == true
-        }.sorted {
-            $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            throw WorkflowStoreError.noPDFs
         }
-        guard !pdfs.isEmpty else { throw PrivateBatchStoreError.noPDFs }
+
+        var pdfs: [URL] = []
+        for case let url as URL in enumerator {
+            let standardized = url.standardizedFileURL
+            if let excludedPath,
+               standardized.path == excludedPath || standardized.path.hasPrefix(excludedPath + "/") {
+                if (try? standardized.resourceValues(forKeys: keys).isDirectory) == true {
+                    enumerator.skipDescendants()
+                }
+                continue
+            }
+            let values = try? standardized.resourceValues(forKeys: keys)
+            guard values?.isHidden != true,
+                  values?.isRegularFile == true,
+                  standardized.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame else { continue }
+            pdfs.append(standardized)
+        }
+        pdfs.sort {
+            relativePath(of: $0, under: root).localizedStandardCompare(
+                relativePath(of: $1, under: root)
+            ) == .orderedAscending
+        }
+        guard !pdfs.isEmpty else { throw WorkflowStoreError.noPDFs }
         return try pdfs.enumerated().map { index, url in
-            PrivateBatchDocument(
+            DiscoveryDocument(
                 id: String(format: "document-%03d", index + 1),
-                path: url.standardizedFileURL.path,
-                sourceFingerprint: try fingerprint(of: url),
-                discoveryReviewedVersion: nil,
-                finalReviewedVersion: nil,
-                exportedVersion: nil,
-                excludedMatchFingerprints: []
+                path: url.path,
+                sourceFingerprint: try fingerprint(of: url)
             )
         }
     }
 
-    static func save(_ session: PrivateBatchSession) throws {
+    static func relativePath(of url: URL, under root: URL) -> String {
+        let rootPath = root.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        guard path.hasPrefix(rootPath + "/") else { return url.lastPathComponent }
+        return String(path.dropFirst(rootPath.count + 1))
+    }
+
+    static func save(_ session: DiscoverySession) throws {
         try ensureDirectory()
         var copy = session
         copy.updatedAt = Date().timeIntervalSince1970
@@ -174,28 +186,33 @@ enum PrivateBatchStore {
         try writeProtected(encoder.encode(copy), to: sessionURL)
     }
 
-    static func load() throws -> PrivateBatchSession? {
+    static func load() throws -> DiscoverySession? {
         guard FileManager.default.fileExists(atPath: sessionURL.path) else { return nil }
         let data = try Data(contentsOf: sessionURL, options: .mappedIfSafe)
-        let session = try JSONDecoder().decode(PrivateBatchSession.self, from: data)
-        guard session.format == "masker-private-batch", session.version == 1 else {
-            throw PrivateBatchStoreError.invalidSession
+        let session = try JSONDecoder().decode(DiscoverySession.self, from: data)
+        guard session.format == "masker-discovery", session.version == 1 else {
+            throw WorkflowStoreError.invalidSession
         }
         return session
     }
 
-    static func savePublicStatus(_ status: PrivateBatchPublicStatus) throws {
+    static func clearDiscovery() throws {
+        guard FileManager.default.fileExists(atPath: sessionURL.path) else { return }
+        try FileManager.default.removeItem(at: sessionURL)
+    }
+
+    static func savePublicStatus(_ status: WorkflowPublicStatus) throws {
         try ensureDirectory()
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         try writeProtected(encoder.encode(status), to: publicStatusURL)
     }
 
-    static func validate(_ document: PrivateBatchDocument) throws -> URL {
+    static func validate(_ document: DiscoveryDocument) throws -> URL {
         let url = URL(fileURLWithPath: document.path).standardizedFileURL
         guard FileManager.default.fileExists(atPath: url.path),
               try fingerprint(of: url) == document.sourceFingerprint else {
-            throw PrivateBatchStoreError.changedDocument(document.id)
+            throw WorkflowStoreError.changedDocument(document.id)
         }
         return url
     }

@@ -10,19 +10,19 @@ import * as z from 'zod/v4';
 
 const execFileAsync = promisify(execFile);
 const documentIDSchema = z.string().regex(/^document-[0-9]{3,}$/);
-const statusPath = process.env.MASKER_PRIVATE_BATCH_DIRECTORY
-  ? resolve(process.env.MASKER_PRIVATE_BATCH_DIRECTORY, 'mcp-status.json')
-  : join(homedir(), 'Library', 'Application Support', 'Masker', 'Private Batch', 'mcp-status.json');
+const statusPath = process.env.MASKER_WORKFLOW_DIRECTORY
+  ? resolve(process.env.MASKER_WORKFLOW_DIRECTORY, 'mcp-status.json')
+  : join(homedir(), 'Library', 'Application Support', 'Masker', 'Workflows', 'mcp-status.json');
 
 const delay = milliseconds => new Promise(resolveDelay => setTimeout(resolveDelay, milliseconds));
 
 function safeStatus(raw) {
-  if (!raw || raw.format !== 'masker-mcp-status' || raw.version !== 1) {
-    throw new Error('Masker has not published a valid private-batch status.');
+  if (!raw || raw.format !== 'masker-workflow-status' || raw.version !== 1) {
+    throw new Error('Masker has not published a valid workflow status.');
   }
   const allowedStates = new Set(['idle', 'ready', 'busy']);
-  const allowedPhases = new Set(['discovery', 'final_review']);
-  const allowedDocumentStates = new Set(['unreviewed', 'reviewed', 'stale', 'exported']);
+  const allowedWorkflows = new Set(['discovery', 'batch_convert']);
+  const allowedDocumentStates = new Set(['unvisited', 'visited', 'active']);
   const documents = Array.isArray(raw.documents) ? raw.documents.map(document => {
     if (!documentIDSchema.safeParse(document.id).success ||
         !Number.isInteger(document.index) ||
@@ -33,20 +33,18 @@ function safeStatus(raw) {
   }) : [];
   return {
     revision: Number.isInteger(raw.revision) ? raw.revision : 0,
+    workflow: allowedWorkflows.has(raw.workflow) ? raw.workflow : null,
     state: allowedStates.has(raw.state) ? raw.state : 'idle',
     session_id: typeof raw.sessionID === 'string' ? raw.sessionID : null,
-    phase: allowedPhases.has(raw.phase) ? raw.phase : null,
     document_count: Number.isInteger(raw.documentCount) ? raw.documentCount : 0,
     documents,
     active_document_id: documentIDSchema.safeParse(raw.activeDocumentID).success
       ? raw.activeDocumentID
       : null,
     active_document_index: Number.isInteger(raw.activeDocumentIndex) ? raw.activeDocumentIndex : null,
-    mask_set_version: Number.isInteger(raw.maskSetVersion) ? raw.maskSetVersion : null,
-    reviewed_count: Number.isInteger(raw.reviewedCount) ? raw.reviewedCount : 0,
-    stale_count: Number.isInteger(raw.staleCount) ? raw.staleCount : 0,
-    exported_count: Number.isInteger(raw.exportedCount) ? raw.exportedCount : 0,
-    current_reviewed: raw.currentReviewed === true,
+    visited_count: Number.isInteger(raw.visitedCount) ? raw.visitedCount : 0,
+    processed_count: Number.isInteger(raw.processedCount) ? raw.processedCount : 0,
+    failed_count: Number.isInteger(raw.failedCount) ? raw.failedCount : 0,
     current_scanned: raw.currentScanned === true,
     match_count: Number.isInteger(raw.matchCount) ? raw.matchCount : null,
     selected_match_count: Number.isInteger(raw.selectedMatchCount) ? raw.selectedMatchCount : null,
@@ -59,28 +57,25 @@ function safeStatus(raw) {
 
 async function readSafeStatus() {
   try {
-    const raw = JSON.parse(await readFile(statusPath, 'utf8'));
-    return safeStatus(raw);
-  } catch (error) {
+    return safeStatus(JSON.parse(await readFile(statusPath, 'utf8')));
+  } catch {
     return {
       revision: 0,
+      workflow: null,
       state: 'idle',
       session_id: null,
-      phase: null,
       document_count: 0,
       documents: [],
       active_document_id: null,
       active_document_index: null,
-      mask_set_version: null,
-      reviewed_count: 0,
-      stale_count: 0,
-      exported_count: 0,
-      current_reviewed: false,
+      visited_count: 0,
+      processed_count: 0,
+      failed_count: 0,
       current_scanned: false,
       match_count: null,
       selected_match_count: null,
       busy: false,
-      user_action_required: 'open_masker_or_create_private_batch'
+      user_action_required: 'open_masker_or_start_workflow'
     };
   }
 }
@@ -96,33 +91,22 @@ function commandIsReflected(command, status, before, documentID) {
   if (status.revision === before.revision) return false;
   if (status.user_action_required === 'resolve_error_in_masker') return true;
   switch (command) {
-    case 'new':
-      return status.user_action_required === 'choose_folder_in_masker' ||
+    case 'new-discovery':
+      return status.user_action_required === 'choose_discovery_folder_in_masker' ||
         (status.session_id !== null && status.session_id !== before.session_id);
-    case 'resume':
-      return status.active_document_id !== null &&
-        status.user_action_required !== 'open_or_review_document';
+    case 'resume-discovery':
+      return status.workflow === 'discovery' && status.active_document_id !== null;
     case 'open':
-      return status.active_document_id === documentID ||
-        status.user_action_required === 'mark_current_document_reviewed';
+      return status.active_document_id === documentID;
     case 'scan':
       return status.busy || status.current_scanned;
-    case 'review':
-      return status.current_reviewed ||
-        status.user_action_required === 'scan_and_review_current_document';
     case 'next':
     case 'previous':
       return status.active_document_id !== before.active_document_id ||
-        status.user_action_required === 'mark_current_document_reviewed' ||
-        status.user_action_required === 'begin_final_pass' ||
-        status.user_action_required === 'export_or_finish_batch';
-    case 'begin-final':
-      return status.phase === 'final_review' ||
-        status.user_action_required === 'finish_discovery_review';
-    case 'export':
-      return status.exported_count > before.exported_count ||
-        status.user_action_required === 'begin_final_pass' ||
-        status.user_action_required === 'scan_and_review_current_document';
+        status.user_action_required === 'export_mask_set_or_batch_convert';
+    case 'batch-convert':
+      return status.workflow === 'batch_convert' ||
+        status.user_action_required === 'choose_batch_inputs_in_masker';
     default:
       return true;
   }
@@ -130,7 +114,7 @@ function commandIsReflected(command, status, before, documentID) {
 
 async function activateMasker(command, documentID) {
   const before = await readSafeStatus();
-  const url = new URL(`masker://private-batch/${command}`);
+  const url = new URL(`masker://workflow/${command}`);
   if (documentID) url.searchParams.set('document', documentID);
   const app = process.env.MASKER_APP_PATH;
   const args = app ? ['-a', app, url.href] : ['-a', 'Masker', url.href];
@@ -154,70 +138,58 @@ function registerCommand(server, name, title, description, command, annotations)
 function buildServer() {
   const server = new McpServer({
     name: 'masker',
-    version: '1.7.1',
-    description: 'Coordinates Masker private PDF batches without returning PDF text, filenames, paths, mask values, labels, or screenshots.'
+    version: '1.8.0',
+    description: 'Coordinates Masker discovery and batch conversion without returning PDF text, filenames, paths, mask values, labels, or screenshots.'
   });
 
-  server.registerTool(
-    'begin_private_batch',
-    {
-      title: 'Begin Private Batch',
-      description: 'Open Masker and ask the user to choose a local PDF folder. Returns only opaque status. Never ask for the folder path or PDF contents.',
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
-    },
-    async () => toolResult(await activateMasker('new'))
+  registerCommand(
+    server,
+    'begin_discovery',
+    'Begin Discovery',
+    'Open Masker so the user can choose a local folder. Masker recursively finds PDFs and returns only opaque status.',
+    'new-discovery',
+    { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
   );
-
   server.registerTool(
-    'get_private_batch_status',
+    'get_workflow_status',
     {
-      title: 'Get Private Batch Status',
+      title: 'Get Workflow Status',
       description: 'Return only opaque document IDs, counts, and workflow state. It never returns filenames, paths, PDF text, mask values, or labels.',
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
     async () => toolResult(await readSafeStatus())
   );
-
   server.registerTool(
-    'open_batch_document',
+    'open_discovery_document',
     {
-      title: 'Open Batch Document',
-      description: 'Open an opaque private-batch document in Masker for the user to review locally.',
+      title: 'Open Discovery Document',
+      description: 'Open an opaque discovery document in Masker for local user review.',
       inputSchema: z.object({ document_id: documentIDSchema }),
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
     },
     async ({ document_id }) => toolResult(await activateMasker('open', document_id))
   );
-
   registerCommand(
     server,
-    'resume_private_batch',
-    'Resume Private Batch',
-    'Open Masker and resume the locally saved private batch without exposing its folder or filenames.',
-    'resume',
+    'resume_discovery',
+    'Resume Discovery',
+    'Resume the saved local discovery session without exposing its folder or filenames.',
+    'resume-discovery',
     { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   );
   registerCommand(
     server,
     'scan_current_document',
     'Scan Current Document',
-    'Start Masker\'s local scan for the current document. Poll status until busy is false; the user reviews results in Masker.',
+    'Run Masker\'s local scan for the current discovery document.',
     'scan',
-    { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-  );
-  registerCommand(
-    server,
-    'mark_current_document_reviewed',
-    'Mark Current Document Reviewed',
-    'Commit the user\'s current local review against the active mask-set version.',
-    'review',
     { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   );
   registerCommand(
     server,
     'open_next_document',
     'Open Next Document',
-    'Advance to the next opaque document after the current document has been marked reviewed.',
+    'Advance to the next opaque discovery document. No review or scan gate is required.',
     'next',
     { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
   );
@@ -225,24 +197,16 @@ function buildServer() {
     server,
     'open_previous_document',
     'Open Previous Document',
-    'Return to the previous opaque document in the private batch.',
+    'Return to the previous opaque discovery document.',
     'previous',
     { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
   );
   registerCommand(
     server,
-    'begin_final_pass',
-    'Begin Final Pass',
-    'Start a final review pass using the completed shared mask set. Every document must be rescanned and reviewed before export.',
-    'begin-final',
-    { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
-  );
-  registerCommand(
-    server,
-    'export_current_document',
-    'Export Current Document',
-    'Create a new sanitized copy of the current document after final review. Source PDFs are never overwritten.',
-    'export',
+    'begin_batch_convert',
+    'Begin Batch Convert',
+    'Open Masker so the user can choose a PDF folder and mask-set JSON. Masker processes the hierarchy locally.',
+    'batch-convert',
     { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
   );
 

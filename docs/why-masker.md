@@ -36,11 +36,11 @@ A black box is enough when the recipient only needs the PII removed. Sometimes t
 
 The value-to-label mapping can be exported as JSON and used on another PDF. It is based on the value, not its location on a particular page.
 
-## A private batch across many PDFs
+## Folders of PDFs
 
-One PDF is straightforward. A folder is harder because the fifth document may reveal a piece of PII that also appeared in the first. Private Batch uses a discovery pass to build one shared mask set. If that set changes, earlier reviews become stale. A final pass then rescans and exports every document with the finished set.
+Discovery Mode walks every PDF under a folder while I build one shared mask set. Batch Convert takes that JSON set and applies it to the same folder hierarchy.
 
-An optional MCP companion lets Codex move the process along without reading the documents. Codex sees opaque names such as `document-001` and a few progress counts. The PDFs and their PII stay inside Masker, and I still review each document in the app.
+The optional MCP companion sees opaque IDs such as `document-001` and progress counts. It does not receive the PDFs, filenames, paths, PII, or mask values.
 
 ## The export and the tests
 
