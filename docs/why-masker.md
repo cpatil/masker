@@ -1,51 +1,49 @@
 # Nothing Personal: I built a local PDF redactor
 
-I needed to share a folder of financial documents with a tax strategist. They needed the financial picture—the institutions, holdings, transactions, and amounts—but not the personally identifiable information (PII) threaded through every document.
+I needed to send financial documents to a tax strategist. They needed the institutions, holdings, transactions, and amounts. They did not need my names, addresses, tax IDs, phone numbers, or account numbers.
 
-That PII was not confined to a cover page. The same names, addresses, tax IDs, phone numbers, and account numbers appeared again and again, sometimes with different capitalization or formatting. Preview can permanently redact a PDF, but I still had to find and select every occurrence by hand.
+Preview can redact a PDF, but I had to find every occurrence myself. The same PII appeared across dozens of pages with different capitalization and formatting.
 
-I built [Masker](https://github.com/cpatil/masker) to find the repetitions while leaving the final decision to me. It is a native macOS app, and scanned pages use Apple's on-device OCR. Nothing is uploaded.
+I built [Masker](https://github.com/cpatil/masker), a native macOS app that finds those repetitions and lets me review them before export. It runs locally. Scanned pages use Apple's on-device OCR.
 
-## Finding PII without hiding the useful parts
+![Masker reviewing a generated Joe Farmer tax return](joe-farmer-overview.png)
 
-The distinction matters. A tax strategist may need to see that an account is at a particular bank or brokerage, but not its identifying suffix. Masker can leave `EXAMPLE BANK` and the amount visible while covering the account number. It can also find formatted and unformatted versions of the same SSN or EIN.
+*The screenshots use a generated Joe Farmer tax return, not a real financial document.*
 
-I enter the PII I already know about, run the scan, and review the proposed masks while scrolling through the full PDF. Clicking a mask selects its row, and any false positive can be unchecked before export.
+## The workflow
 
-![Full Masker review screen showing a generated Joe Farmer tax return, the shared mask options, per-page matches, and the continuously scrolling PDF](joe-farmer-overview.png)
+1. Enter the PII to mask.
+2. Scan the PDF.
+3. Review each proposed mask and uncheck false positives.
+4. Search for anything missed, add it, and rescan.
+5. Export a sanitized copy.
 
-*Reviewing a generated Joe Farmer return. No real financial document is used in these screenshots.*
+Masker also detects SSNs, EINs, email addresses, phone numbers, and account suffixes. It can keep an institution name visible while covering only its account number.
 
-Matches are case-insensitive and stop at word boundaries. Longer overlapping values take precedence.
+The PDF stays scrollable during review. Clicking a black box selects the corresponding match in the list.
 
-## Looking for what I missed
+![Searching for a synthetic name that was not in the original mask set](joe-farmer-search.png)
 
-My bigger concern was missed PII. The search box lets me try a surname, street number, or account suffix and move through the remaining visible results. Matches already covered by a selected mask stay out of the search results. If I find something new, I add it and rescan.
+Search ignores text already covered by a selected mask. Here it finds a synthetic dependent name that I had not added yet.
 
-![Incremental search finding the still-visible synthetic dependent name Jimmy Farmer while already-selected masks are omitted](joe-farmer-search.png)
+## Labels when black boxes are not enough
 
-*A search catches one synthetic name that was not in the original mask set.*
+A tax strategist may need to tell two people or two accounts apart. A mask can carry a label such as `Client-1` or `Account-2`.
 
-## Keeping context with labels
+![Synthetic taxpayers and SSNs replaced with labels](joe-farmer-labels.png)
 
-A black box is enough when the recipient only needs the PII removed. Sometimes they still need to distinguish two people or two accounts. In those cases I can replace the original value with a label such as `Client-1` or `Account-2`.
+The value-to-label mapping exports as JSON. It can be imported for another PDF without storing page numbers, coordinates, filenames, or paths.
 
-![Two synthetic taxpayers replaced with Client-1 and Client-2, and their SSNs replaced with SSN-1 and SSN-2](joe-farmer-labels.png)
+## Folders
 
-*Labels keep the relationships in the document without retaining the original PII.*
+Discovery Mode walks a folder of PDFs while I build one shared mask set. Batch Convert applies an exported set to every PDF under a folder and preserves its directory structure. Each input produces a separate sanitized PDF.
 
-The value-to-label mapping can be exported as JSON and used on another PDF. It is based on the value, not its location on a particular page.
+There is also an optional MCP companion. It reports opaque document IDs and progress counts; it does not receive PDFs, filenames, paths, PII, mask values, or labels.
 
-## Folders of PDFs
+## Export and testing
 
-Discovery Mode walks every PDF under a folder while I build one shared mask set. Batch Convert takes that JSON set and applies it to the same folder hierarchy.
+The export rebuilds every page from sanitized pixels. The original PDF text is not copied into the output.
 
-The optional MCP companion sees opaque IDs such as `document-001` and progress counts. It does not receive the PDFs, filenames, paths, PII, or mask values.
+This app was vibe-coded with Codex. Its tests use generated PDFs, including the Joe Farmer return above. They cover text PDFs, scanned pages, rotated pages, overlapping matches, labels, imports, rescans, folder discovery, and batch conversion. Exported files are checked again with text extraction and OCR.
 
-## The export and the tests
-
-Masker rebuilds each exported page from sanitized pixels rather than copying the original PDF structure. Preview may OCR the visible output again, but the masked PII is no longer present in the image.
-
-I vibe-coded this with Codex, but I did not want my tax return anywhere near the test suite. The repo generates fake PDFs, including the Joe Farmer return in these screenshots. After an export, the tests use text extraction and OCR to check that the masked values are actually gone.
-
-Masker is open source. The universal Apple Silicon/Intel app and the optional MCP companion are available from the [latest GitHub release](https://github.com/cpatil/masker/releases/latest).
+Masker is open source. Download the universal Apple Silicon/Intel build from the [latest release](https://github.com/cpatil/masker/releases/latest).

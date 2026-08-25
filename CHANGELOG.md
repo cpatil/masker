@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.8.1 - 2026-08-25
+
+- Removes the static **Offline** badge from the header. Local processing is already stated in the app subtitle and explanatory text.
+
 ## 1.8.0 - 2026-08-25
 
 - Replaces Private Batch and its review/final-pass gate with two separate workflows.

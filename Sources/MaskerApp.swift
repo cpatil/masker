@@ -1284,11 +1284,8 @@ struct ContentView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
-            Spacer()
-            Label("Offline", systemImage: "lock.shield")
-                .font(.callout.weight(.medium))
-                .foregroundStyle(.green)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 18)
         .padding(.vertical, 12)
     }
