@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.0 - 2026-08-24
+
+- Adds a compact optional **Replace with** field beside each detected value; an empty field keeps the standard black mask.
+- Uses one case-insensitive value-to-label mapping across every occurrence, without tying labels to a page or position.
+- Burns replacement labels into black masks as white image pixels while keeping sanitized PDFs free of a searchable text layer.
+- Upgrades mask-value exports to portable JSON schema v2 and carries replacement mappings across PDFs; schema v1 remains importable.
+- Keeps click-to-review behavior for both black-only and labeled masks.
+
 ## 1.4.6 - 2026-08-24
 
 - Removes replacement labels and reveal-on-hover, returning preview and export to consistent black masks.

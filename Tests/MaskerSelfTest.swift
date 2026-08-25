@@ -201,6 +201,25 @@ struct MaskerSelfTest {
         )
         try require(!boundaryMatches.contains(where: { $0.category.hasPrefix("SSN / ITIN compact") }), "Compact identifier matched inside a longer number")
 
+        let replacements = [
+            PDFMasker.normalizedReplacementKey(for: "Example Person"): "Client",
+            PDFMasker.normalizedReplacementKey(for: "3436"): "Account 1"
+        ]
+        if let preview = PDFMasker.previewImage(
+            fileURL: source,
+            pageIndex: 0,
+            matches: matches,
+            replacementsByValue: replacements,
+            dpi: 180
+        ), let cgImage = preview.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            let representation = NSBitmapImageRep(cgImage: cgImage)
+            if let data = representation.representation(using: .png, properties: [:]) {
+                try data.write(to: root.appendingPathComponent("core-render-replacements.png"))
+            }
+        } else {
+            throw TestFailure(description: "Could not render replacement-label preview")
+        }
+
         let pathologicalRect = RedactionMatch(
             fileURL: source,
             pageIndex: 3,
@@ -212,6 +231,7 @@ struct MaskerSelfTest {
             files: [source],
             matches: matches + [pathologicalRect],
             outputFolder: outputs,
+            replacementsByValue: replacements,
             progress: { _ in }
         )
         try require(created.count == 1, "Expected one output")
@@ -226,7 +246,8 @@ struct MaskerSelfTest {
         let corruptFailure = PDFMasker.sanitizedOutputValidationFailure(
             corruptOutput,
             sourceDocument: sourceDocument,
-            matches: matches + [pathologicalRect]
+            matches: matches + [pathologicalRect],
+            replacementsByValue: replacements
         )
         try require(corruptFailure != nil, "Visual validation accepted a half-corrupted PDF")
         try require(corruptFailure?.contains("page 1") == true, "Visual validation did not identify the corrupted page")
@@ -238,6 +259,19 @@ struct MaskerSelfTest {
             progress: { _ in }
         )
         try require(residual.isEmpty, "OCR found sensitive text after sanitization: \(residual.map(\.matchedText))")
+
+        let visibleLabels = PDFMasker.scan(
+            files: created,
+            exactTerms: ["Client"],
+            options: PatternOptions(
+                detectSSN: false,
+                detectEIN: false,
+                detectEmail: false,
+                detectPhone: false
+            ),
+            progress: { _ in }
+        )
+        try require(!visibleLabels.isEmpty, "Replacement label was not visibly rendered into the output pixels")
 
         let preservedInstitutions = PDFMasker.scan(
             files: created,

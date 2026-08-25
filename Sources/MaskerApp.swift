@@ -58,11 +58,24 @@ private extension View {
 }
 
 final class MaskerModel: ObservableObject {
-    private struct MaskValuesExport: Codable {
+    private struct MaskValueEntry: Codable, Equatable {
+        let value: String
+        var replaceWith: String
+    }
+
+    private struct MaskValuesExportV2: Codable {
         let format: String
         let version: Int
         let pdfFileName: String
-        let maskValues: [String]
+        let masks: [MaskValueEntry]
+    }
+
+    private struct MaskValuesImport: Decodable {
+        let format: String
+        let version: Int
+        let pdfFileName: String
+        let maskValues: [String]?
+        let masks: [MaskValueEntry]?
     }
 
     private enum MaskValuesImportError: LocalizedError {
@@ -87,6 +100,7 @@ final class MaskerModel: ObservableObject {
 
     private static let recentPDFPathsKey = "recentPDFPaths"
     private static let maskValuesByPDFPathKey = "maskValuesByPDFPath"
+    private static let maskReplacementsByPDFPathKey = "maskReplacementsByPDFPath"
     private static let maximumRecentPDFs = 10
 
     private let userDefaults: UserDefaults
@@ -101,6 +115,7 @@ final class MaskerModel: ObservableObject {
     @Published var generateNameVariants = false
     @Published var detectAccountSuffixes = false
     @Published var accountSuffixExceptions = ""
+    @Published private var replacementEntriesByKey: [String: MaskValueEntry] = [:]
     @Published var matches: [RedactionMatch] = []
     @Published var selectedMatchID: UUID?
     @Published var activeFileURL: URL?
@@ -142,8 +157,13 @@ final class MaskerModel: ObservableObject {
             files.append(url)
         }
         rememberRecentFiles(pdfs)
-        if wasEmpty, pdfs.count == 1, let restored = storedMaskValues(for: pdfs[0]) {
-            exactValues = restored
+        if wasEmpty {
+            if pdfs.count == 1 {
+                exactValues = storedMaskValues(for: pdfs[0]) ?? ""
+                replacementEntriesByKey = storedReplacementEntries(for: pdfs[0])
+            } else {
+                replacementEntriesByKey = [:]
+            }
         }
         if outputFolder == nil, let first = files.first {
             outputFolder = first.deletingLastPathComponent().appendingPathComponent("Masked PDFs", isDirectory: true)
@@ -170,6 +190,7 @@ final class MaskerModel: ObservableObject {
         currentPreviewPage = 0
         outputFolder = standardized.deletingLastPathComponent().appendingPathComponent("Masked PDFs", isDirectory: true)
         exactValues = storedMaskValues(for: standardized) ?? ""
+        replacementEntriesByKey = storedReplacementEntries(for: standardized)
         rememberRecentFiles([standardized])
         status = "Restored recent PDF and its saved mask values. Ready to scan."
     }
@@ -177,21 +198,33 @@ final class MaskerModel: ObservableObject {
     func stashMaskValuesForLoadedFiles() {
         guard !files.isEmpty else { return }
         var stored = userDefaults.dictionary(forKey: Self.maskValuesByPDFPathKey) as? [String: String] ?? [:]
+        var storedReplacements = userDefaults.dictionary(
+            forKey: Self.maskReplacementsByPDFPathKey
+        ) as? [String: String] ?? [:]
+        let encodedReplacements = encodedReplacementEntries(replacementEntriesByKey)
         for file in files {
+            let path = file.standardizedFileURL.path
             if exactValues.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                stored.removeValue(forKey: file.standardizedFileURL.path)
+                stored.removeValue(forKey: path)
             } else {
-                stored[file.standardizedFileURL.path] = exactValues
+                stored[path] = exactValues
+            }
+            if let encodedReplacements {
+                storedReplacements[path] = encodedReplacements
+            } else {
+                storedReplacements.removeValue(forKey: path)
             }
         }
         userDefaults.set(stored, forKey: Self.maskValuesByPDFPathKey)
+        userDefaults.set(storedReplacements, forKey: Self.maskReplacementsByPDFPathKey)
     }
 
     func stashedValueCount(for file: URL) -> Int {
-        guard let values = storedMaskValues(for: file) else { return 0 }
-        return values.split(whereSeparator: \.isNewline).filter {
-            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }.count
+        let exactKeys = Set((storedMaskValues(for: file) ?? "")
+            .split(whereSeparator: \.isNewline)
+            .map { PDFMasker.normalizedReplacementKey(for: String($0)) }
+            .filter { !$0.isEmpty })
+        return exactKeys.union(storedReplacementEntries(for: file).keys).count
     }
 
     func stashedMaskValuesJSON(for file: URL) throws -> Data {
@@ -199,11 +232,21 @@ final class MaskerModel: ObservableObject {
             .split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        let payload = MaskValuesExport(
+        let storedEntries = storedReplacementEntries(for: file)
+        var seen = Set<String>()
+        var masks = values.compactMap { value -> MaskValueEntry? in
+            let key = PDFMasker.normalizedReplacementKey(for: value)
+            guard !key.isEmpty, seen.insert(key).inserted else { return nil }
+            return MaskValueEntry(value: value, replaceWith: storedEntries[key]?.replaceWith ?? "")
+        }
+        masks.append(contentsOf: storedEntries.values
+            .filter { seen.insert(PDFMasker.normalizedReplacementKey(for: $0.value)).inserted }
+            .sorted { $0.value.localizedCaseInsensitiveCompare($1.value) == .orderedAscending })
+        let payload = MaskValuesExportV2(
             format: "masker-mask-values",
-            version: 1,
+            version: 2,
             pdfFileName: file.lastPathComponent,
-            maskValues: values
+            masks: masks
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
@@ -241,14 +284,14 @@ final class MaskerModel: ObservableObject {
         for file: URL,
         allowMismatchedFilename: Bool = false
     ) throws -> Int {
-        let payload = try JSONDecoder().decode(MaskValuesExport.self, from: data)
+        let payload = try JSONDecoder().decode(MaskValuesImport.self, from: data)
         guard payload.format == "masker-mask-values" else {
             throw MaskValuesImportError.invalidFormat
         }
-        guard payload.version == 1 else {
+        guard payload.version == 1 || payload.version == 2 else {
             throw MaskValuesImportError.unsupportedVersion(payload.version)
         }
-        guard allowMismatchedFilename ||
+        guard payload.version >= 2 || allowMismatchedFilename ||
                 payload.pdfFileName.caseInsensitiveCompare(file.lastPathComponent) == .orderedSame else {
             throw MaskValuesImportError.filenameMismatch(
                 exported: payload.pdfFileName,
@@ -257,29 +300,55 @@ final class MaskerModel: ObservableObject {
         }
 
         var seen = Set<String>()
-        let values = payload.maskValues.compactMap { raw -> String? in
-            let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            let key = value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            guard !value.isEmpty, seen.insert(key).inserted else { return nil }
-            return value
+        let importedEntries: [MaskValueEntry]
+        if payload.version == 1 {
+            importedEntries = (payload.maskValues ?? []).map {
+                MaskValueEntry(value: $0, replaceWith: "")
+            }
+        } else {
+            importedEntries = payload.masks ?? []
         }
-        guard !values.isEmpty else { throw MaskValuesImportError.noValues }
+        let entries = importedEntries.compactMap { raw -> MaskValueEntry? in
+            let value = raw.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = PDFMasker.normalizedReplacementKey(for: value)
+            guard !value.isEmpty, seen.insert(key).inserted else { return nil }
+            return MaskValueEntry(
+                value: value,
+                replaceWith: raw.replaceWith.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+        guard !entries.isEmpty else { throw MaskValuesImportError.noValues }
 
-        let joined = values.joined(separator: "\n")
+        let joined = entries.map(\.value).joined(separator: "\n")
+        let replacements = Dictionary(uniqueKeysWithValues: entries.compactMap { entry -> (String, MaskValueEntry)? in
+            guard !entry.replaceWith.isEmpty else { return nil }
+            return (PDFMasker.normalizedReplacementKey(for: entry.value), entry)
+        })
         var stored = userDefaults.dictionary(forKey: Self.maskValuesByPDFPathKey) as? [String: String] ?? [:]
-        stored[file.standardizedFileURL.path] = joined
+        let path = file.standardizedFileURL.path
+        stored[path] = joined
         userDefaults.set(stored, forKey: Self.maskValuesByPDFPathKey)
+        var storedReplacements = userDefaults.dictionary(
+            forKey: Self.maskReplacementsByPDFPathKey
+        ) as? [String: String] ?? [:]
+        if let encoded = encodedReplacementEntries(replacements) {
+            storedReplacements[path] = encoded
+        } else {
+            storedReplacements.removeValue(forKey: path)
+        }
+        userDefaults.set(storedReplacements, forKey: Self.maskReplacementsByPDFPathKey)
 
         if files.count == 1, files[0].standardizedFileURL == file.standardizedFileURL {
             exactValues = joined
+            replacementEntriesByKey = replacements
             matches = []
             selectedMatchID = nil
-            status = "Imported \(values.count) mask value\(values.count == 1 ? "" : "s"). Ready to scan."
+            status = "Imported \(entries.count) mask value\(entries.count == 1 ? "" : "s"). Ready to scan."
         } else {
-            status = "Imported \(values.count) saved mask value\(values.count == 1 ? "" : "s") for \(file.lastPathComponent)."
+            status = "Imported \(entries.count) saved mask value\(entries.count == 1 ? "" : "s") for \(file.lastPathComponent)."
             objectWillChange.send()
         }
-        return values.count
+        return entries.count
     }
 
     func importStashedMaskValues(for file: URL) {
@@ -335,12 +404,18 @@ final class MaskerModel: ObservableObject {
         var stored = userDefaults.dictionary(forKey: Self.maskValuesByPDFPathKey) as? [String: String] ?? [:]
         stored.removeValue(forKey: path)
         userDefaults.set(stored, forKey: Self.maskValuesByPDFPathKey)
+        var storedReplacements = userDefaults.dictionary(
+            forKey: Self.maskReplacementsByPDFPathKey
+        ) as? [String: String] ?? [:]
+        storedReplacements.removeValue(forKey: path)
+        userDefaults.set(storedReplacements, forKey: Self.maskReplacementsByPDFPathKey)
     }
 
     func clearRecentFiles() {
         recentFiles = []
         userDefaults.removeObject(forKey: Self.recentPDFPathsKey)
         userDefaults.removeObject(forKey: Self.maskValuesByPDFPathKey)
+        userDefaults.removeObject(forKey: Self.maskReplacementsByPDFPathKey)
     }
 
     func removeFile(_ url: URL) {
@@ -418,6 +493,7 @@ final class MaskerModel: ObservableObject {
 
         let inputFiles = files
         let reviewedMatches = matches
+        let replacements = replacementsByValue
         isBusy = true
         status = "Preparing sanitized copies..."
 
@@ -426,7 +502,8 @@ final class MaskerModel: ObservableObject {
                 let outputs = try PDFMasker.exportSanitizedCopies(
                     files: inputFiles,
                     matches: reviewedMatches,
-                    outputFolder: folder
+                    outputFolder: folder,
+                    replacementsByValue: replacements
                 ) { message in
                     DispatchQueue.main.async { self.status = message }
                 }
@@ -446,6 +523,26 @@ final class MaskerModel: ObservableObject {
 
     func selectAll(_ selected: Bool) {
         for index in matches.indices { matches[index].isSelected = selected }
+    }
+
+    var replacementsByValue: [String: String] {
+        replacementEntriesByKey.mapValues(\.replaceWith)
+    }
+
+    func replacementText(for value: String) -> String {
+        replacementEntriesByKey[PDFMasker.normalizedReplacementKey(for: value)]?.replaceWith ?? ""
+    }
+
+    func setReplacementText(_ text: String, for value: String) {
+        let key = PDFMasker.normalizedReplacementKey(for: value)
+        guard !key.isEmpty else { return }
+        let label = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if label.isEmpty {
+            replacementEntriesByKey.removeValue(forKey: key)
+        } else {
+            replacementEntriesByKey[key] = MaskValueEntry(value: value, replaceWith: label)
+        }
+        stashMaskValuesForLoadedFiles()
     }
 
     func selectCurrentPage(_ selected: Bool) {
@@ -507,6 +604,31 @@ final class MaskerModel: ObservableObject {
     private func storedMaskValues(for file: URL) -> String? {
         let stored = userDefaults.dictionary(forKey: Self.maskValuesByPDFPathKey) as? [String: String]
         return stored?[file.standardizedFileURL.path]
+    }
+
+    private func storedReplacementEntries(for file: URL) -> [String: MaskValueEntry] {
+        guard let stored = userDefaults.dictionary(
+            forKey: Self.maskReplacementsByPDFPathKey
+        ) as? [String: String],
+              let encoded = stored[file.standardizedFileURL.path],
+              let data = encoded.data(using: .utf8),
+              let entries = try? JSONDecoder().decode([MaskValueEntry].self, from: data) else {
+            return [:]
+        }
+        return Dictionary(uniqueKeysWithValues: entries.compactMap { entry in
+            let key = PDFMasker.normalizedReplacementKey(for: entry.value)
+            guard !key.isEmpty, !entry.replaceWith.isEmpty else { return nil }
+            return (key, entry)
+        })
+    }
+
+    private func encodedReplacementEntries(_ entries: [String: MaskValueEntry]) -> String? {
+        let values = entries.values.sorted {
+            $0.value.localizedCaseInsensitiveCompare($1.value) == .orderedAscending
+        }
+        guard !values.isEmpty,
+              let data = try? JSONEncoder().encode(values) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 }
 
@@ -881,6 +1003,17 @@ struct ContentView: View {
                                                 .redacted(reason: model.revealDetectedValues ? [] : .privacy)
                                         }
                                         Spacer()
+                                        TextField(
+                                            "Replace with",
+                                            text: Binding(
+                                                get: { model.replacementText(for: model.matches[index].matchedText) },
+                                                set: { model.setReplacementText($0, for: model.matches[index].matchedText) }
+                                            )
+                                        )
+                                        .textFieldStyle(.roundedBorder)
+                                        .controlSize(.small)
+                                        .frame(width: 112)
+                                        .help("Optional label rendered inside the black mask")
                                     }
                                     .padding(.horizontal, 11)
                                     .padding(.vertical, 7)
@@ -960,6 +1093,7 @@ struct ContentView: View {
                     ContinuousPDFView(
                         fileURL: activeFile,
                         matches: model.matches.filter { $0.fileURL.standardizedFileURL == activeFile.standardizedFileURL },
+                        replacementsByValue: model.replacementsByValue,
                         currentPage: $model.currentPreviewPage,
                         selectedMatchID: $model.selectedMatchID,
                         searchText: model.pdfSearchText,
@@ -1091,6 +1225,7 @@ typealias MaskPDFView = PDFView
 struct ContinuousPDFView: NSViewRepresentable {
     let fileURL: URL
     let matches: [RedactionMatch]
+    let replacementsByValue: [String: String]
     @Binding var currentPage: Int
     @Binding var selectedMatchID: UUID?
     let searchText: String
@@ -1122,6 +1257,7 @@ struct ContinuousPDFView: NSViewRepresentable {
         context.coordinator.updateDocumentIfNeeded(
             fileURL: fileURL,
             matches: matches,
+            replacementsByValue: replacementsByValue,
             requestedPage: currentPage
         )
         context.coordinator.updateSearchIfNeeded(searchText)
@@ -1211,6 +1347,7 @@ struct ContinuousPDFView: NSViewRepresentable {
         func updateDocumentIfNeeded(
             fileURL: URL,
             matches: [RedactionMatch],
+            replacementsByValue: [String: String],
             requestedPage: Int
         ) {
             guard let pdfView else { return }
@@ -1218,7 +1355,11 @@ struct ContinuousPDFView: NSViewRepresentable {
             let matchPart = matches
                 .map { "\($0.id.uuidString):\($0.isSelected ? 1 : 0)" }
                 .joined(separator: "|")
-            let signature = filePath + "|" + matchPart
+            let replacementPart = replacementsByValue
+                .sorted { $0.key < $1.key }
+                .map { "\($0.key)=\($0.value)" }
+                .joined(separator: "|")
+            let signature = filePath + "|" + matchPart + "|" + replacementPart
 
             if signature != documentSignature {
                 previewMasks = [:]
@@ -1228,7 +1369,11 @@ struct ContinuousPDFView: NSViewRepresentable {
                 let visiblePage = pdfView.currentPage.flatMap { pdfView.document?.index(for: $0) }
                 let targetPage = loadedFilePath == filePath ? (visiblePage ?? requestedPage) : requestedPage
                 guard let data = try? Data(contentsOf: fileURL), let document = PDFDocument(data: data) else { return }
-                addRedactionAnnotations(matches.filter(\.isSelected), to: document)
+                addRedactionAnnotations(
+                    matches.filter(\.isSelected),
+                    replacementsByValue: replacementsByValue,
+                    to: document
+                )
                 documentSignature = signature
                 loadedFilePath = filePath
                 pdfView.document = document
@@ -1419,6 +1564,7 @@ struct ContinuousPDFView: NSViewRepresentable {
 
         private func addRedactionAnnotations(
             _ matches: [RedactionMatch],
+            replacementsByValue: [String: String],
             to document: PDFDocument
         ) {
             for match in matches {
@@ -1426,16 +1572,50 @@ struct ContinuousPDFView: NSViewRepresentable {
                 let pageRects = PDFMasker.safeRedactionRects(match.rects, on: page).map {
                     pageRect(for: $0, on: page).insetBy(dx: -0.5, dy: -0.5)
                 }
-                for pageRect in pageRects {
-                    let annotation = PDFAnnotation(bounds: pageRect, forType: .square, withProperties: nil)
-                    annotation.color = .black
-                    annotation.interiorColor = .black
-                    annotation.shouldDisplay = true
-                    annotation.shouldPrint = true
-                    let border = PDFBorder()
-                    border.lineWidth = 0
-                    annotation.border = border
-                    page.addAnnotation(annotation)
+                let label = PDFMasker.replacementLabel(
+                    for: match.matchedText,
+                    replacementsByValue: replacementsByValue
+                )
+                let labelIndex = label.flatMap { _ in
+                    pageRects.indices.max { pageRects[$0].width < pageRects[$1].width }
+                }
+                for (index, pageRect) in pageRects.enumerated() {
+                    let replacementText = index == labelIndex ? label : nil
+                    let mask = PDFAnnotation(
+                        bounds: pageRect,
+                        forType: .square,
+                        withProperties: nil
+                    )
+                    mask.color = .black
+                    mask.interiorColor = .black
+                    mask.shouldDisplay = true
+                    mask.shouldPrint = true
+                    let maskBorder = PDFBorder()
+                    maskBorder.lineWidth = 0
+                    mask.border = maskBorder
+                    page.addAnnotation(mask)
+                    if let replacementText {
+                        let labelAnnotation = PDFAnnotation(
+                            bounds: pageRect.insetBy(dx: 1, dy: 1),
+                            forType: .freeText,
+                            withProperties: nil
+                        )
+                        labelAnnotation.contents = replacementText
+                        labelAnnotation.font = NSFont(
+                            name: "Helvetica-Bold",
+                            size: min(10, max(5, pageRect.height * 0.42))
+                        )
+                        labelAnnotation.fontColor = .white
+                        labelAnnotation.alignment = .center
+                        labelAnnotation.color = .clear
+                        labelAnnotation.interiorColor = .clear
+                        labelAnnotation.shouldDisplay = true
+                        labelAnnotation.shouldPrint = true
+                        let labelBorder = PDFBorder()
+                        labelBorder.lineWidth = 0
+                        labelAnnotation.border = labelBorder
+                        page.addAnnotation(labelAnnotation)
+                    }
                 }
                 if !pageRects.isEmpty {
                     previewMasks[match.id] = PreviewMaskGroup(page: page, hitRects: pageRects)

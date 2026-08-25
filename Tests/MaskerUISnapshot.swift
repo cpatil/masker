@@ -36,6 +36,7 @@ struct MaskerUISnapshot {
         let seedModel = MaskerModel(userDefaults: testDefaults)
         seedModel.addFiles([input])
         seedModel.exactValues = "JOE AND MARY FARMER\n444-55-6666"
+        seedModel.setReplacementText("Client", for: "JOE AND MARY FARMER")
         seedModel.stashMaskValuesForLoadedFiles()
 
         let model = MaskerModel(userDefaults: testDefaults)
@@ -44,6 +45,10 @@ struct MaskerUISnapshot {
         precondition(
             model.exactValues == "JOE AND MARY FARMER\n444-55-6666",
             "Saved mask values were not restored with the recent PDF"
+        )
+        precondition(
+            model.replacementText(for: "joe and mary farmer") == "Client",
+            "Saved replacement label was not restored case-insensitively"
         )
         model.outputFolder = URL(fileURLWithPath: "/Users/example/Documents/Masked PDFs", isDirectory: true)
         model.detectEmail = true
@@ -85,10 +90,20 @@ struct MaskerUISnapshot {
         let exportedData = try model.stashedMaskValuesJSON(for: input)
         let exportedValues = try JSONSerialization.jsonObject(with: exportedData) as? [String: Any]
         precondition(exportedValues?["format"] as? String == "masker-mask-values", "Mask-value export format is missing")
+        precondition(exportedValues?["version"] as? Int == 2, "Mask-value export did not use portable schema v2")
         precondition(exportedValues?["pdfFileName"] as? String == input.lastPathComponent, "Mask-value export has the wrong PDF name")
-        precondition((exportedValues?["maskValues"] as? [String])?.count == 2, "Mask-value export did not include two values")
+        let exportedMasks = exportedValues?["masks"] as? [[String: Any]]
+        precondition(exportedMasks?.count == 2, "Mask-value export did not include two values")
+        precondition(
+            exportedMasks?.contains(where: {
+                ($0["value"] as? String)?.caseInsensitiveCompare("JOE AND MARY FARMER") == .orderedSame &&
+                    $0["replaceWith"] as? String == "Client"
+            }) == true,
+            "Mask-value export did not carry the replacement mapping"
+        )
         precondition(exportedValues?["pdfPath"] == nil, "Mask-value export must not disclose the local PDF path")
         model.exactValues = ""
+        model.setReplacementText("", for: "JOE AND MARY FARMER")
         model.stashMaskValuesForLoadedFiles()
         precondition(model.stashedValueCount(for: input) == 0, "Could not clear values before import test")
         let importedCount = try model.importStashedMaskValuesJSON(exportedData, for: input)
@@ -97,9 +112,14 @@ struct MaskerUISnapshot {
             model.exactValues == "JOE AND MARY FARMER\n444-55-6666",
             "Mask-value import did not restore the exact-value editor"
         )
+        precondition(
+            model.replacementText(for: "Joe And Mary Farmer") == "Client",
+            "Mask-value import did not restore the replacement mapping"
+        )
         let exportedFile = output.deletingLastPathComponent().appendingPathComponent("roundtrip-mask-values.json")
         try exportedData.write(to: exportedFile, options: .atomic)
         model.exactValues = ""
+        model.setReplacementText("", for: "JOE AND MARY FARMER")
         model.stashMaskValuesForLoadedFiles()
         let fileImportedCount = try model.importStashedMaskValuesFile(exportedFile, for: input)
         precondition(fileImportedCount == 2, "Mask-value file import did not restore two values")
@@ -112,9 +132,21 @@ struct MaskerUISnapshot {
         var mismatchedObject = exportedValues ?? [:]
         mismatchedObject["pdfFileName"] = "different-document.pdf"
         let mismatchedData = try JSONSerialization.data(withJSONObject: mismatchedObject)
+        let portableImportCount = try model.importStashedMaskValuesJSON(mismatchedData, for: input)
+        precondition(
+            portableImportCount == 2,
+            "Portable v2 mapping could not be applied to a differently named PDF"
+        )
+        let legacyObject: [String: Any] = [
+            "format": "masker-mask-values",
+            "version": 1,
+            "pdfFileName": "different-document.pdf",
+            "maskValues": ["Legacy Value"]
+        ]
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
         do {
-            try model.importStashedMaskValuesJSON(mismatchedData, for: input)
-            preconditionFailure("Mask-value import accepted a mismatched filename without confirmation")
+            try model.importStashedMaskValuesJSON(legacyData, for: input)
+            preconditionFailure("Legacy v1 import accepted a mismatched filename without confirmation")
         } catch { }
 
         if let pdfView = findPDFView(in: hosting), let document = pdfView.document {
@@ -146,7 +178,6 @@ struct MaskerUISnapshot {
             )
             let clickHandled = maskView.simulateMaskClickForTesting(at: clickPoint)
             precondition(clickHandled, "Preview mask hit testing failed")
-            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
             precondition(model.selectedMatchID != nil, "Clicking a mask did not select its review row")
             FileHandle.standardError.write(Data("PASS maskClickSelection\n".utf8))
 
@@ -168,6 +199,8 @@ struct MaskerUISnapshot {
         }
         try png.write(to: output)
 
+        window.orderOut(nil)
+        window.contentView = nil
         model.clearRecentFiles()
         let clearedModel = MaskerModel(userDefaults: testDefaults)
         precondition(clearedModel.recentFiles.isEmpty, "Clear did not remove recent PDFs")

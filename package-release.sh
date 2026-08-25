@@ -20,6 +20,7 @@ compile_arch() {
     -O \
     -framework AppKit \
     -framework CoreGraphics \
+    -framework CoreText \
     -framework PDFKit \
     -framework SwiftUI \
     -framework UniformTypeIdentifiers \

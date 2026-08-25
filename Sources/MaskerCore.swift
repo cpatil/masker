@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import CoreText
 import Foundation
 import PDFKit
 import Vision
@@ -63,6 +64,11 @@ enum MaskerError: LocalizedError {
 }
 
 enum PDFMasker {
+    private struct ReplacementOverlay {
+        let rects: [CGRect]
+        let label: String
+    }
+
     private final class OCRPageCacheEntry: NSObject {
         let observations: [VNRecognizedTextObservation]
 
@@ -176,6 +182,7 @@ enum PDFMasker {
         files: [URL],
         matches: [RedactionMatch],
         outputFolder: URL,
+        replacementsByValue: [String: String] = [:],
         dpi: CGFloat = 300,
         progress: @escaping (String) -> Void
     ) throws -> [URL] {
@@ -219,7 +226,21 @@ enum PDFMasker {
                         let redactionRects = fileMatches
                             .filter { $0.pageIndex == pageIndex }
                             .flatMap(\.rects)
-                        guard let image = renderPage(page, dpi: dpi, redactionRects: redactionRects) else {
+                        let replacementOverlays = fileMatches
+                            .filter { $0.pageIndex == pageIndex }
+                            .compactMap { match -> ReplacementOverlay? in
+                                guard let label = replacementLabel(
+                                    for: match.matchedText,
+                                    replacementsByValue: replacementsByValue
+                                ) else { return nil }
+                                return ReplacementOverlay(rects: match.rects, label: label)
+                            }
+                        guard let image = renderPage(
+                            page,
+                            dpi: dpi,
+                            redactionRects: redactionRects,
+                            replacementOverlays: replacementOverlays
+                        ) else {
                             context.endPDFPage()
                             throw MaskerError.cannotRender(page: pageIndex, file: fileURL)
                         }
@@ -241,7 +262,8 @@ enum PDFMasker {
             if let validationFailure = sanitizedOutputValidationFailure(
                 outputURL,
                 sourceDocument: document,
-                matches: fileMatches
+                matches: fileMatches,
+                replacementsByValue: replacementsByValue
             ) {
                 try? FileManager.default.removeItem(at: outputURL)
                 throw MaskerError.outputValidationFailed(outputURL, validationFailure)
@@ -256,11 +278,25 @@ enum PDFMasker {
         fileURL: URL,
         pageIndex: Int,
         matches: [RedactionMatch],
+        replacementsByValue: [String: String] = [:],
         dpi: CGFloat = 110
     ) -> NSImage? {
         guard let document = PDFDocument(url: fileURL), let page = document.page(at: pageIndex) else { return nil }
-        let rects = matches.filter { $0.pageIndex == pageIndex && $0.isSelected }.flatMap(\.rects)
-        guard let cgImage = renderPage(page, dpi: dpi, redactionRects: rects) else { return nil }
+        let pageMatches = matches.filter { $0.pageIndex == pageIndex && $0.isSelected }
+        let rects = pageMatches.flatMap(\.rects)
+        let replacementOverlays = pageMatches.compactMap { match -> ReplacementOverlay? in
+            guard let label = replacementLabel(
+                for: match.matchedText,
+                replacementsByValue: replacementsByValue
+            ) else { return nil }
+            return ReplacementOverlay(rects: match.rects, label: label)
+        }
+        guard let cgImage = renderPage(
+            page,
+            dpi: dpi,
+            redactionRects: rects,
+            replacementOverlays: replacementOverlays
+        ) else { return nil }
         return NSImage(cgImage: cgImage, size: displayBounds(for: page).size)
     }
 
@@ -781,10 +817,33 @@ enum PDFMasker {
         }
     }
 
+    static func normalizedReplacementKey(for value: String) -> String {
+        value
+            .folding(
+                options: [.caseInsensitive, .diacriticInsensitive],
+                locale: Locale(identifier: "en_US_POSIX")
+            )
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
+            .lowercased()
+    }
+
+    static func replacementLabel(
+        for value: String,
+        replacementsByValue: [String: String]
+    ) -> String? {
+        let key = normalizedReplacementKey(for: value)
+        guard !key.isEmpty,
+              let rawLabel = replacementsByValue[key] else { return nil }
+        let label = rawLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return label.isEmpty ? nil : label
+    }
+
     private static func renderPage(
         _ page: PDFPage,
         dpi: CGFloat,
-        redactionRects: [CGRect]
+        redactionRects: [CGRect],
+        replacementOverlays: [ReplacementOverlay] = []
     ) -> CGImage? {
         let scale = max(dpi / 72.0, 1.0)
         let pageBounds = page.bounds(for: .mediaBox)
@@ -839,22 +898,87 @@ enum PDFMasker {
             for rect in safeRedactionRects(redactionRects, on: page) {
                 bitmap.fill(rect.insetBy(dx: -0.75, dy: -0.75))
             }
+            for overlay in replacementOverlays {
+                guard let labelRect = safeRedactionRects(overlay.rects, on: page).max(by: {
+                    if abs($0.width - $1.width) > 0.5 { return $0.width < $1.width }
+                    return $0.width * $0.height < $1.width * $1.height
+                }) else { continue }
+                drawReplacementLabel(overlay.label, in: labelRect, context: bitmap)
+            }
         }
         return bitmap.makeImage()
+    }
+
+    static func drawReplacementLabel(
+        _ label: String,
+        in rect: CGRect,
+        context: CGContext
+    ) {
+        let available = rect.insetBy(dx: 2, dy: 1)
+        guard available.width >= 6, available.height >= 4 else { return }
+
+        let maximumSize = min(10, max(available.height * 0.62, 4))
+        let minimumSize: CGFloat = 4
+        var fontSize = maximumSize
+        var font = CTFontCreateWithName("Helvetica-Bold" as CFString, fontSize, nil)
+        var attributes: [CFString: Any] = [
+            kCTFontAttributeName: font,
+            kCTForegroundColorAttributeName: NSColor.white.cgColor
+        ]
+        var line = CTLineCreateWithAttributedString(
+            CFAttributedStringCreate(nil, label as CFString, attributes as CFDictionary)
+        )
+        var width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+        if width > available.width {
+            fontSize = max(minimumSize, fontSize * available.width / max(width, 1))
+            font = CTFontCreateWithName("Helvetica-Bold" as CFString, fontSize, nil)
+            attributes[kCTFontAttributeName] = font
+            line = CTLineCreateWithAttributedString(
+                CFAttributedStringCreate(nil, label as CFString, attributes as CFDictionary)
+            )
+            width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+        }
+        if width > available.width {
+            let token = CTLineCreateWithAttributedString(
+                CFAttributedStringCreate(nil, "..." as CFString, attributes as CFDictionary)
+            )
+            if let truncated = CTLineCreateTruncatedLine(line, Double(available.width), .end, token) {
+                line = truncated
+                width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+            }
+        }
+
+        var ascent: CGFloat = 0
+        var descent: CGFloat = 0
+        _ = CTLineGetTypographicBounds(line, &ascent, &descent, nil)
+        let x = available.minX + max((available.width - width) / 2, 0)
+        let y = available.midY - (ascent - descent) / 2
+        context.saveGState()
+        context.textMatrix = .identity
+        context.textPosition = CGPoint(x: x, y: y)
+        CTLineDraw(line, context)
+        context.restoreGState()
     }
 
     static func validateSanitizedOutput(
         _ url: URL,
         sourceDocument: PDFDocument,
-        matches: [RedactionMatch]
+        matches: [RedactionMatch],
+        replacementsByValue: [String: String] = [:]
     ) -> Bool {
-        sanitizedOutputValidationFailure(url, sourceDocument: sourceDocument, matches: matches) == nil
+        sanitizedOutputValidationFailure(
+            url,
+            sourceDocument: sourceDocument,
+            matches: matches,
+            replacementsByValue: replacementsByValue
+        ) == nil
     }
 
     static func sanitizedOutputValidationFailure(
         _ url: URL,
         sourceDocument: PDFDocument,
-        matches: [RedactionMatch]
+        matches: [RedactionMatch],
+        replacementsByValue: [String: String] = [:]
     ) -> String? {
         guard let output = PDFDocument(url: url) else { return "the output could not be reopened" }
         guard output.pageCount == sourceDocument.pageCount else { return "the page count changed" }
@@ -872,7 +996,21 @@ enum PDFMasker {
             let redactionRects = matches
                 .filter { $0.pageIndex == index && $0.isSelected }
                 .flatMap(\.rects)
-            guard let expectedImage = renderPage(sourcePage, dpi: 72, redactionRects: redactionRects),
+            let replacementOverlays = matches
+                .filter { $0.pageIndex == index && $0.isSelected }
+                .compactMap { match -> ReplacementOverlay? in
+                    guard let label = replacementLabel(
+                        for: match.matchedText,
+                        replacementsByValue: replacementsByValue
+                    ) else { return nil }
+                    return ReplacementOverlay(rects: match.rects, label: label)
+                }
+            guard let expectedImage = renderPage(
+                    sourcePage,
+                    dpi: 72,
+                    redactionRects: redactionRects,
+                    replacementOverlays: replacementOverlays
+                  ),
                   let outputImage = renderPage(outputPage, dpi: 72, redactionRects: []),
                   imagesAreVisuallyEquivalent(expectedImage, outputImage) else {
                 return "page \(index + 1) does not visually match the source"
