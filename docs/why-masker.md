@@ -13,7 +13,7 @@ The first use case is preparing tax returns, brokerage statements, K-1s, and sup
 There are a few variations of that problem:
 
 - Remove the same household names, addresses, SSNs, EINs, emails, and phone numbers everywhere they appear.
-- Keep a bank or brokerage name visible while masking only the trailing account identifier. `MERRILL LYNCH - 9550` becomes `MERRILL LYNCH - ████`; the institution and amount columns remain useful.
+- Keep a bank or brokerage name visible while masking only the trailing account identifier. `EXAMPLE BANK - 1234` becomes `EXAMPLE BANK - ████`; the institution and amount columns remain useful.
 - Reuse one set of values across several PDFs or a later year's documents instead of starting over.
 - Replace a value with a stable label such as `Client-1`, `Client-2`, or `Account-1` when the recipient still needs to distinguish people or accounts.
 - Handle scanned statements as well as PDFs with a normal text layer.
@@ -26,7 +26,7 @@ Masker shows the full PDF as a continuous scroll. The match list follows the pag
 
 *This is a generated Joe Farmer fixture, not a real tax return. The left side controls what to find; the top-right list controls what will actually be masked on the visible page.*
 
-Matching is case-insensitive and uses word boundaries, so a saved value such as `703 Chopin Dr` can find `703 CHOPIN DR` without a short value such as `PATI` masking part of `Participation`. When values overlap, the longest value wins.
+Matching is case-insensitive and uses word boundaries, so a saved value such as `1234 Fake Street` can find `1234 FAKE STREET` without a short value such as `PATI` masking part of `Participation`. When values overlap, the longest value wins.
 
 The automatic detectors cover SSNs and ITINs, EINs, email addresses, US phone numbers, and institution-style account suffixes. A formatted SSN or EIN also finds its compact version without dashes. Name variants are optional: a value such as `JOE AND MARY FARMER` can also look for `JOE FARMER`.
 
