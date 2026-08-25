@@ -58,37 +58,33 @@ private extension View {
 }
 
 final class MaskerModel: ObservableObject {
-    private struct MaskValuesExportV2: Codable {
+    private struct MaskSetExport: Codable {
         let format: String
         let version: Int
-        let pdfFileName: String
         let masks: [MaskValueEntry]
     }
 
-    private struct MaskValuesImport: Decodable {
+    private struct MaskSetImport: Decodable {
         let format: String
         let version: Int
-        let pdfFileName: String
+        let pdfFileName: String?
         let maskValues: [String]?
         let masks: [MaskValueEntry]?
     }
 
-    private enum MaskValuesImportError: LocalizedError {
+    private enum MaskSetImportError: LocalizedError {
         case invalidFormat
         case unsupportedVersion(Int)
         case noValues
-        case filenameMismatch(exported: String, selected: String)
 
         var errorDescription: String? {
             switch self {
             case .invalidFormat:
-                return "This is not a Masker mask-values file."
+                return "This is not a Masker mask-set file."
             case .unsupportedVersion(let version):
-                return "This mask-values file uses unsupported version \(version)."
+                return "This mask-set file uses unsupported version \(version)."
             case .noValues:
-                return "This file does not contain any mask values."
-            case .filenameMismatch(let exported, let selected):
-                return "These values were exported for \(exported), not \(selected)."
+                return "This file does not contain any mask values or labels."
             }
         }
     }
@@ -141,6 +137,7 @@ final class MaskerModel: ObservableObject {
     private var lastScannedBatchDocumentID: String?
     private var lastScannedBatchMaskSetVersion: Int?
     private var publicStatusRevision = 0
+    private var maskSetImportPanel: NSOpenPanel?
 
     var selectedCount: Int { matches.filter(\.isSelected).count }
 
@@ -686,88 +683,60 @@ final class MaskerModel: ObservableObject {
         return exactKeys.union(storedReplacementEntries(for: file).keys).count
     }
 
-    func stashedMaskValuesJSON(for file: URL) throws -> Data {
-        let values = (storedMaskValues(for: file) ?? "")
-            .split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        let storedEntries = storedReplacementEntries(for: file)
-        var seen = Set<String>()
-        var masks = values.compactMap { value -> MaskValueEntry? in
-            let key = PDFMasker.normalizedReplacementKey(for: value)
-            guard !key.isEmpty, seen.insert(key).inserted else { return nil }
-            var entry = storedEntries[key] ?? MaskValueEntry(value: value, replaceWith: "")
-            entry.value = value
-            return entry
-        }
-        masks.append(contentsOf: storedEntries.values
-            .filter { seen.insert(PDFMasker.normalizedReplacementKey(for: $0.value)).inserted }
-            .sorted { $0.value.localizedCaseInsensitiveCompare($1.value) == .orderedAscending })
-        let payload = MaskValuesExportV2(
-            format: "masker-mask-values",
-            version: 2,
-            pdfFileName: file.lastPathComponent,
-            masks: masks
-        )
+    var maskSetValueCount: Int { currentMaskEntries().count }
+
+    func currentMaskSetJSON() throws -> Data {
+        let masks = currentMaskEntries()
+        guard !masks.isEmpty else { throw MaskSetImportError.noValues }
+        let payload = MaskSetExport(format: "masker-mask-set", version: 1, masks: masks)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         return try encoder.encode(payload)
     }
 
-    func exportStashedMaskValues(for file: URL) {
-        if files.contains(where: { $0.standardizedFileURL == file.standardizedFileURL }) {
-            stashMaskValuesForLoadedFiles()
-        }
-        guard stashedValueCount(for: file) > 0 else {
-            showError("There are no saved mask values for \(file.lastPathComponent).")
+    func exportCurrentMaskSet() {
+        guard maskSetValueCount > 0 else {
+            showError("Add at least one mask value or label before exporting the set.")
             return
         }
 
         let panel = NSSavePanel()
-        panel.title = "Export Mask Values"
+        panel.title = "Export Mask Set"
         panel.prompt = "Export"
         panel.allowedContentTypes = [.json]
         panel.canCreateDirectories = true
-        panel.nameFieldStringValue = file.deletingPathExtension().lastPathComponent + "-mask-values.json"
+        panel.nameFieldStringValue = "masker-mask-set.json"
         guard panel.runModal() == .OK, let destination = panel.url else { return }
 
         do {
-            try stashedMaskValuesJSON(for: file).write(to: destination, options: .atomic)
-            status = "Exported saved mask values to \(destination.lastPathComponent)."
+            try currentMaskSetJSON().write(to: destination, options: .atomic)
+            status = "Exported the mask set to \(destination.lastPathComponent)."
         } catch {
-            showError("Could not export the saved mask values: \(error.localizedDescription)")
+            showError("Could not export the mask set: \(error.localizedDescription)")
         }
     }
 
     @discardableResult
-    func importStashedMaskValuesJSON(
-        _ data: Data,
-        for file: URL,
-        allowMismatchedFilename: Bool = false
-    ) throws -> Int {
-        let payload = try JSONDecoder().decode(MaskValuesImport.self, from: data)
-        guard payload.format == "masker-mask-values" else {
-            throw MaskValuesImportError.invalidFormat
-        }
-        guard payload.version == 1 || payload.version == 2 else {
-            throw MaskValuesImportError.unsupportedVersion(payload.version)
-        }
-        guard payload.version >= 2 || allowMismatchedFilename ||
-                payload.pdfFileName.caseInsensitiveCompare(file.lastPathComponent) == .orderedSame else {
-            throw MaskValuesImportError.filenameMismatch(
-                exported: payload.pdfFileName,
-                selected: file.lastPathComponent
-            )
-        }
+    func importMaskSetJSON(_ data: Data) throws -> Int {
+        let payload = try JSONDecoder().decode(MaskSetImport.self, from: data)
 
         var seen = Set<String>()
         let importedEntries: [MaskValueEntry]
-        if payload.version == 1 {
+        if payload.format == "masker-mask-set" {
+            guard payload.version == 1 else {
+                throw MaskSetImportError.unsupportedVersion(payload.version)
+            }
+            importedEntries = payload.masks ?? []
+        } else if payload.format == "masker-mask-values", payload.version == 1 {
             importedEntries = (payload.maskValues ?? []).map {
                 MaskValueEntry(value: $0, replaceWith: "")
             }
-        } else {
+        } else if payload.format == "masker-mask-values", payload.version == 2 {
             importedEntries = payload.masks ?? []
+        } else if payload.format == "masker-mask-values" {
+            throw MaskSetImportError.unsupportedVersion(payload.version)
+        } else {
+            throw MaskSetImportError.invalidFormat
         }
         let entries = importedEntries.compactMap { raw -> MaskValueEntry? in
             let value = raw.value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -782,84 +751,76 @@ final class MaskerModel: ObservableObject {
                 justification: ReplacementLabelAlignment(rawValue: raw.justification ?? "")?.rawValue
             )
         }
-        guard !entries.isEmpty else { throw MaskValuesImportError.noValues }
+        guard !entries.isEmpty else { throw MaskSetImportError.noValues }
 
-        let joined = entries.map(\.value).joined(separator: "\n")
-        let replacements = Dictionary(uniqueKeysWithValues: entries.compactMap { entry -> (String, MaskValueEntry)? in
+        var mergedByKey = Dictionary(uniqueKeysWithValues: currentMaskEntries().map {
+            (PDFMasker.normalizedReplacementKey(for: $0.value), $0)
+        })
+        var addedCount = 0
+        var filledLabelCount = 0
+        for entry in entries {
+            let key = PDFMasker.normalizedReplacementKey(for: entry.value)
+            if var existing = mergedByKey[key] {
+                if existing.replaceWith.isEmpty, !entry.replaceWith.isEmpty {
+                    existing.replaceWith = entry.replaceWith
+                    existing.fontName = entry.fontName
+                    existing.fontSize = entry.fontSize
+                    existing.widthPercent = entry.widthPercent
+                    existing.justification = entry.justification
+                    mergedByKey[key] = existing
+                    filledLabelCount += 1
+                }
+            } else {
+                mergedByKey[key] = entry
+                addedCount += 1
+            }
+        }
+        let merged = mergedByKey.values.sorted {
+            $0.value.localizedCaseInsensitiveCompare($1.value) == .orderedAscending
+        }
+        let joined = merged.map(\.value).joined(separator: "\n")
+        let replacements = Dictionary(uniqueKeysWithValues: merged.compactMap { entry -> (String, MaskValueEntry)? in
             guard !entry.replaceWith.isEmpty else { return nil }
             return (PDFMasker.normalizedReplacementKey(for: entry.value), entry)
         })
-        var stored = userDefaults.dictionary(forKey: Self.maskValuesByPDFPathKey) as? [String: String] ?? [:]
-        let path = file.standardizedFileURL.path
-        stored[path] = joined
-        userDefaults.set(stored, forKey: Self.maskValuesByPDFPathKey)
-        var storedReplacements = userDefaults.dictionary(
-            forKey: Self.maskReplacementsByPDFPathKey
-        ) as? [String: String] ?? [:]
-        if let encoded = encodedReplacementEntries(replacements) {
-            storedReplacements[path] = encoded
-        } else {
-            storedReplacements.removeValue(forKey: path)
-        }
-        userDefaults.set(storedReplacements, forKey: Self.maskReplacementsByPDFPathKey)
-
-        if files.count == 1, files[0].standardizedFileURL == file.standardizedFileURL {
-            exactValues = joined
-            replacementEntriesByKey = replacements
-            matches = []
-            selectedMatchID = nil
-            status = "Imported \(entries.count) mask value\(entries.count == 1 ? "" : "s"). Ready to scan."
-        } else {
-            status = "Imported \(entries.count) saved mask value\(entries.count == 1 ? "" : "s") for \(file.lastPathComponent)."
-            objectWillChange.send()
-        }
-        return entries.count
+        exactValues = joined
+        replacementEntriesByKey = replacements
+        matches = []
+        selectedMatchID = nil
+        stashMaskValuesForLoadedFiles()
+        let labelSummary = filledLabelCount == 0 ? "" : " and filled \(filledLabelCount) label\(filledLabelCount == 1 ? "" : "s")"
+        status = "Imported \(addedCount) new value\(addedCount == 1 ? "" : "s")\(labelSummary). \(merged.count) total."
+        return merged.count
     }
 
-    func importStashedMaskValues(for file: URL) {
+    func importMaskSet() {
+        guard maskSetImportPanel == nil else {
+            maskSetImportPanel?.makeKeyAndOrderFront(nil)
+            return
+        }
         let panel = NSOpenPanel()
-        panel.title = "Import Mask Values"
+        panel.title = "Import Mask Set"
         panel.prompt = "Import"
         panel.allowedContentTypes = [.json]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
+        maskSetImportPanel = panel
         panel.begin { [weak self] response in
+            guard let self else { return }
+            defer { self.maskSetImportPanel = nil }
             guard response == .OK, let source = panel.url else { return }
-            self?.finishImportingStashedMaskValues(from: source, for: file)
-        }
-    }
-
-    private func finishImportingStashedMaskValues(from source: URL, for file: URL) {
-        do {
             do {
-                try importStashedMaskValuesFile(source, for: file)
-            } catch MaskValuesImportError.filenameMismatch(let exported, let selected) {
-                let alert = NSAlert()
-                alert.alertStyle = .warning
-                alert.messageText = "Use values from a different PDF?"
-                alert.informativeText = "This file was exported for \(exported), not \(selected)."
-                alert.addButton(withTitle: "Import Anyway")
-                alert.addButton(withTitle: "Cancel")
-                guard alert.runModal() == .alertFirstButtonReturn else { return }
-                try importStashedMaskValuesFile(source, for: file, allowMismatchedFilename: true)
+                try self.importMaskSetFile(source)
+            } catch {
+                self.showError("Could not import the mask set: \(error.localizedDescription)")
             }
-        } catch {
-            showError("Could not import the saved mask values: \(error.localizedDescription)")
         }
     }
 
     @discardableResult
-    func importStashedMaskValuesFile(
-        _ source: URL,
-        for file: URL,
-        allowMismatchedFilename: Bool = false
-    ) throws -> Int {
+    func importMaskSetFile(_ source: URL) throws -> Int {
         let data = try Data(contentsOf: source, options: .mappedIfSafe)
-        return try importStashedMaskValuesJSON(
-            data,
-            for: file,
-            allowMismatchedFilename: allowMismatchedFilename
-        )
+        return try importMaskSetJSON(data)
     }
 
     func forgetRecentFile(_ url: URL) {
@@ -1327,7 +1288,7 @@ struct ContentView: View {
                                     } label: {
                                         Label("Recents", systemImage: "clock")
                                     }
-                                    .help("Open a recent PDF or export its saved mask values")
+                                    .help("Reopen a PDF and restore its locally remembered mask set")
                                 }
                             }
                         }
@@ -1354,6 +1315,13 @@ struct ContentView: View {
                                 .buttonStyle(.plain)
                             }
                             .font(.callout)
+                        }
+
+                        if model.files.count > 1 {
+                            Text("\(model.files.count) PDFs selected. They share one scan and mask set, but export as separate PDF files.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
 
                         if let session = model.privateBatchSession {
@@ -1450,25 +1418,6 @@ struct ContentView: View {
                                     .buttonStyle(.plain)
 
                                     Button {
-                                        model.importStashedMaskValues(for: file)
-                                    } label: {
-                                        Label("Import", systemImage: "square.and.arrow.down")
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .controlSize(.small)
-                                    .help("Restore mask values from a Masker JSON file")
-
-                                    Button {
-                                        model.exportStashedMaskValues(for: file)
-                                    } label: {
-                                        Label("Export", systemImage: "square.and.arrow.up")
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .controlSize(.small)
-                                    .disabled(model.stashedValueCount(for: file) == 0)
-                                    .help("Export this PDF's saved mask values as JSON")
-
-                                    Button {
                                         model.forgetRecentFile(file)
                                     } label: {
                                         Image(systemName: "xmark")
@@ -1491,8 +1440,35 @@ struct ContentView: View {
                 GroupBox("2. Choose what to mask") {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 10) {
+                            HStack(spacing: 8) {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Mask set")
+                                        .font(.callout.weight(.medium))
+                                    Text("Portable values, labels, and label appearance")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Button {
+                                    model.importMaskSet()
+                                } label: {
+                                    Label("Import", systemImage: "square.and.arrow.down")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .help("Import a generic Masker mask-set JSON file")
+                                Button {
+                                    model.exportCurrentMaskSet()
+                                } label: {
+                                    Label("Export", systemImage: "square.and.arrow.up")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(model.maskSetValueCount == 0)
+                                .help("Export the current values and labels as a generic JSON mask set")
+                            }
                             Text("Exact values - one per line")
-                                .font(.callout.weight(.medium))
+                                .font(.caption.weight(.medium))
                             TextEditor(text: $model.exactValues)
                                 .font(.system(.body, design: .monospaced))
                                 .frame(minHeight: 90)
@@ -1840,7 +1816,12 @@ struct ContentView: View {
                 Button {
                     model.export()
                 } label: {
-                    Label("Create Sanitized Copies", systemImage: "lock.doc")
+                    Label(
+                        model.files.count > 1
+                            ? "Create \(model.files.count) Sanitized Copies"
+                            : "Create Sanitized Copy",
+                        systemImage: "lock.doc"
+                    )
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(model.selectedCount == 0 || model.isBusy)

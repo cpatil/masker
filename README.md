@@ -22,7 +22,8 @@ Read the short development story: [I vibe-coded a PDF redactor because I needed 
 - Opt-in institution account-suffix detection that keeps names such as `MERRILL LYNCH` and right-aligned table amounts visible.
 - Line-scoped exceptions for false positives such as `FORM 8879`.
 - Search-as-you-type with previous/next navigation and cached on-device OCR; selected masks are omitted from results.
-- A local Recent PDFs list that restores each PDF's saved mask values and optional replacement labels, and can import or export them as portable JSON.
+- A local Recent PDFs list that reopens each PDF with its locally remembered mask set.
+- Generic mask-set JSON import and export, including labels and appearance, with merge-on-import and no PDF filename or path.
 - Continuous-scroll review with matches synchronized to the visible page; clicking a black mask selects and scrolls to its review row.
 - An optional **Replace with** field for each value. Repeated case-insensitive values share one label, which is burned into the black mask as non-searchable pixels.
 - Automatic per-match label orientation plus portable controls for font, maximum size, text-frame width, and alignment.
@@ -68,14 +69,14 @@ Restart Codex after installation. See [mcp/README.md](mcp/README.md) for the too
 
 ## Use it
 
-1. Drop in one or more PDFs.
-2. Enter exact values to mask, one per line.
+1. Drop in one or more PDFs. Multiple inputs share one scan and mask set; they are not combined.
+2. Enter exact values to mask, one per line, or import a generic mask-set JSON file. Imports merge with the values already present.
 3. Enable any additional detectors you want.
 4. Click **Scan PDFs Locally**.
 5. Scroll through the PDF and uncheck anything that should remain visible.
 6. Optionally type a short label such as `Client` or `Account 1` beside a match. Use the adjacent text-style menu to adjust font, maximum size, width, and alignment. Leave the label empty for a plain black mask.
 7. Search for possible variants; use **Add & Rescan** when you find another value to remove.
-8. Click **Create Sanitized Copies**.
+8. Click **Create Sanitized Copy**. With multiple inputs, Masker creates a separate sanitized PDF for each input.
 
 Masker never overwrites an original. Output names end in `_masked.pdf`; if that name exists, a number is added.
 
@@ -85,7 +86,7 @@ Each exported page is rebuilt from sanitized pixels at 300 DPI using Core Graphi
 
 This intentionally removes the searchable and editable text layer. Replacement labels are rendered into the sanitized page image rather than added as PDF text. Preview and other apps may still use OCR to search text that remains visibly rendered on the page; masked values are removed from those pixels. Rasterization also increases file size compared with object-level redaction.
 
-Mask-value exports use a portable value-to-label mapping, including optional label appearance. They do not contain page numbers, coordinates, orientation, or the source file path, so the same JSON can be imported for another PDF. Label orientation is inferred again from each occurrence. A value is matched case-insensitively; identical values use the same label everywhere. Version 1 exports from older Masker releases still import as black-only masks.
+Mask-set exports use a portable value-to-label mapping, including optional label appearance. They do not contain a PDF filename, source path, page numbers, coordinates, or orientation, so the same JSON can be imported anywhere. Import adds new values to the current set without overwriting existing labels. Label orientation is inferred again from each occurrence. Older per-PDF Masker JSON files remain importable.
 
 ## Privacy and limitations
 
@@ -104,7 +105,7 @@ Mask-value exports use a portable value-to-label mapping, including optional lab
 ./test.sh
 ```
 
-The self-test generates its own searchable, scanned, and rotated PDFs. It covers the `JOE AND MARY FARMER` to `Joe Farmer` name variant, identifier variants, institution suffixes, exceptions, cached OCR search, portable value/label JSON, pixel-rendered labels, click-to-review selection, private-batch persistence and status sanitization, permanent export, and residual-text checks. The MCP tests exercise both supported protocol eras and verify the status privacy boundary. No tax documents or private fixtures are stored in this repository.
+The self-test generates its own searchable, scanned, and rotated PDFs. It covers the `JOE AND MARY FARMER` to `Joe Farmer` name variant, identifier variants, institution suffixes, exceptions, cached OCR search, generic mask-set JSON, repeated file loading, merge behavior, pixel-rendered labels, click-to-review selection, private-batch persistence and status sanitization, permanent export, and residual-text checks. The MCP tests exercise both supported protocol eras and verify the status privacy boundary. No tax documents or private fixtures are stored in this repository.
 
 An optional local-only corpus test is also available:
 

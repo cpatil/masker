@@ -49,7 +49,7 @@ swiftc \
   "$project_dir/Tests/MaskerUISnapshot.swift" \
   -o "$project_dir/.build/masker-ui-snapshot"
 
-env MASKER_SNAPSHOT_VERSION="v1.7.0" \
+env MASKER_SNAPSHOT_VERSION="v1.7.1" \
   "$project_dir/.build/masker-ui-snapshot" \
   "$test_root/sample-tax-document.pdf" \
   "$test_root/ui-snapshot.png"

@@ -154,7 +154,7 @@ function registerCommand(server, name, title, description, command, annotations)
 function buildServer() {
   const server = new McpServer({
     name: 'masker',
-    version: '1.7.0',
+    version: '1.7.1',
     description: 'Coordinates Masker private PDF batches without returning PDF text, filenames, paths, mask values, labels, or screenshots.'
   });
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.7.1 - 2026-08-25
+
+- Moves mask-set Import and Export into **Choose what to mask** instead of tying the actions to a recent PDF.
+- Exports a generic `masker-mask-set` JSON file with values, labels, and label appearance, but no PDF filename or path.
+- Merges imported sets with existing values case-insensitively, keeps existing labels, fills missing labels, and suppresses duplicates.
+- Continues to import legacy Masker JSON files without requiring the original PDF.
+- Clarifies that selecting multiple PDFs scans them with one shared set and exports a separate sanitized copy for each input.
+
 ## 1.7.0 - 2026-08-25
 
 - Adds a private-batch workflow for reviewing a folder of PDFs against one shared, versioned mask set.

@@ -103,13 +103,13 @@ struct MaskerUISnapshot {
         hosting.layoutSubtreeIfNeeded()
         precondition(model.pdfSearchResultCount == 1, "Search should list only the unchecked Farmer result")
         precondition(model.stashedValueCount(for: input) == 2, "Recent PDF did not retain two mask values")
-        let exportedData = try model.stashedMaskValuesJSON(for: input)
+        let exportedData = try model.currentMaskSetJSON()
         let exportedValues = try JSONSerialization.jsonObject(with: exportedData) as? [String: Any]
-        precondition(exportedValues?["format"] as? String == "masker-mask-values", "Mask-value export format is missing")
-        precondition(exportedValues?["version"] as? Int == 2, "Mask-value export did not use portable schema v2")
-        precondition(exportedValues?["pdfFileName"] as? String == input.lastPathComponent, "Mask-value export has the wrong PDF name")
+        precondition(exportedValues?["format"] as? String == "masker-mask-set", "Generic mask-set export format is missing")
+        precondition(exportedValues?["version"] as? Int == 1, "Mask-set export did not use schema v1")
+        precondition(exportedValues?["pdfFileName"] == nil, "Generic mask-set export must not contain a PDF filename")
         let exportedMasks = exportedValues?["masks"] as? [[String: Any]]
-        precondition(exportedMasks?.count == 2, "Mask-value export did not include two values")
+        precondition(exportedMasks?.count == 2, "Mask-set export did not include two values")
         precondition(
             exportedMasks?.contains(where: {
                 ($0["value"] as? String)?.caseInsensitiveCompare("JOE AND MARY FARMER") == .orderedSame &&
@@ -119,47 +119,69 @@ struct MaskerUISnapshot {
                     $0["widthPercent"] as? Double == 75 &&
                     $0["justification"] as? String == "left"
             }) == true,
-            "Mask-value export did not carry the replacement mapping"
+            "Mask-set export did not carry the replacement mapping"
         )
-        precondition(exportedValues?["pdfPath"] == nil, "Mask-value export must not disclose the local PDF path")
+        precondition(exportedValues?["pdfPath"] == nil, "Mask-set export must not disclose the local PDF path")
         model.exactValues = ""
         model.setReplacementText("", for: "JOE AND MARY FARMER")
         model.stashMaskValuesForLoadedFiles()
         precondition(model.stashedValueCount(for: input) == 0, "Could not clear values before import test")
-        let importedCount = try model.importStashedMaskValuesJSON(exportedData, for: input)
-        precondition(importedCount == 2, "Mask-value import did not restore two values")
+        let importedCount = try model.importMaskSetJSON(exportedData)
+        precondition(importedCount == 2, "Mask-set import did not restore two values")
         precondition(
-            model.exactValues == "JOE AND MARY FARMER\n444-55-6666",
-            "Mask-value import did not restore the exact-value editor"
+            Set(model.exactValues.split(whereSeparator: \.isNewline).map(String.init)) ==
+                Set(["JOE AND MARY FARMER", "444-55-6666"]),
+            "Mask-set import did not restore the exact-value editor"
         )
         precondition(
             model.replacementText(for: "Joe And Mary Farmer") == "Client",
-            "Mask-value import did not restore the replacement mapping"
+            "Mask-set import did not restore the replacement mapping"
         )
         precondition(model.replacementFontName(for: "Joe And Mary Farmer") == "Times-Bold", "Mask-value import did not restore the label font")
         precondition(model.replacementFontSize(for: "Joe And Mary Farmer") == 12, "Mask-value import did not restore the label size")
         precondition(model.replacementWidthPercent(for: "Joe And Mary Farmer") == 75, "Mask-value import did not restore the label width")
         precondition(model.replacementJustification(for: "Joe And Mary Farmer") == "left", "Mask-value import did not restore the label alignment")
-        let exportedFile = output.deletingLastPathComponent().appendingPathComponent("roundtrip-mask-values.json")
+        let exportedFile = output.deletingLastPathComponent().appendingPathComponent("roundtrip-mask-set.json")
         try exportedData.write(to: exportedFile, options: .atomic)
-        model.exactValues = ""
-        model.setReplacementText("", for: "JOE AND MARY FARMER")
+        model.exactValues = "JOE AND MARY FARMER\nLOCAL ONLY"
+        model.setReplacementText("Local Client", for: "JOE AND MARY FARMER")
         model.stashMaskValuesForLoadedFiles()
-        let fileImportedCount = try model.importStashedMaskValuesFile(exportedFile, for: input)
-        precondition(fileImportedCount == 2, "Mask-value file import did not restore two values")
+        let fileImportedCount = try model.importMaskSetFile(exportedFile)
+        precondition(fileImportedCount == 3, "Mask-set file import did not merge with existing values")
         precondition(
-            model.exactValues == "JOE AND MARY FARMER\n444-55-6666",
-            "Mask-value file import did not restore the exact-value editor"
+            Set(model.exactValues.split(whereSeparator: \.isNewline).map(String.init)) ==
+                Set(["JOE AND MARY FARMER", "LOCAL ONLY", "444-55-6666"]),
+            "Mask-set file import did not keep existing values while adding imported values"
+        )
+        precondition(
+            model.replacementText(for: "Joe And Mary Farmer") == "Local Client",
+            "Mask-set import overwrote an existing label"
+        )
+        for _ in 0..<3 {
+            let repeatedCount = try model.importMaskSetFile(exportedFile)
+            precondition(repeatedCount == 3, "Repeated mask-set import introduced duplicates")
+        }
+        let fillLabelModel = MaskerModel(userDefaults: testDefaults)
+        fillLabelModel.exactValues = "JOE AND MARY FARMER"
+        let fillLabelCount = try fillLabelModel.importMaskSetFile(exportedFile)
+        precondition(fillLabelCount == 2, "Mask-set import did not merge into a prefilled editor")
+        precondition(
+            fillLabelModel.replacementText(for: "joe and mary farmer") == "Client",
+            "Imported label did not fill an existing unlabeled value"
         )
         try? FileManager.default.removeItem(at: exportedFile)
 
-        var mismatchedObject = exportedValues ?? [:]
-        mismatchedObject["pdfFileName"] = "different-document.pdf"
-        let mismatchedData = try JSONSerialization.data(withJSONObject: mismatchedObject)
-        let portableImportCount = try model.importStashedMaskValuesJSON(mismatchedData, for: input)
+        let legacyV2Object: [String: Any] = [
+            "format": "masker-mask-values",
+            "version": 2,
+            "pdfFileName": "different-document.pdf",
+            "masks": [["value": "LEGACY V2 VALUE", "replaceWith": "Imported Label"]]
+        ]
+        let legacyV2Data = try JSONSerialization.data(withJSONObject: legacyV2Object)
+        let portableImportCount = try model.importMaskSetJSON(legacyV2Data)
         precondition(
-            portableImportCount == 2,
-            "Portable v2 mapping could not be applied to a differently named PDF"
+            portableImportCount == 4 && model.replacementText(for: "legacy v2 value") == "Imported Label",
+            "Legacy v2 mapping could not be merged as a generic mask set"
         )
         let legacyObject: [String: Any] = [
             "format": "masker-mask-values",
@@ -168,10 +190,8 @@ struct MaskerUISnapshot {
             "maskValues": ["Legacy Value"]
         ]
         let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
-        do {
-            try model.importStashedMaskValuesJSON(legacyData, for: input)
-            preconditionFailure("Legacy v1 import accepted a mismatched filename without confirmation")
-        } catch { }
+        let legacyCount = try model.importMaskSetJSON(legacyData)
+        precondition(legacyCount == 5, "Legacy v1 values did not merge into the generic mask set")
 
         if let pdfView = findPDFView(in: hosting), let document = pdfView.document {
             precondition(pdfView.displayMode == .singlePageContinuous, "PDF viewer is not continuous")
