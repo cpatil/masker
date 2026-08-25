@@ -64,6 +64,6 @@ There is also an optional MCP companion for coordinating that sequence from Code
 
 Each exported page is rebuilt from sanitized pixels at 300 DPI. The original text layer, forms, annotations, attachments, scripts, layers, and metadata are not copied. Preview may OCR the visible output again, but the selected values are no longer in the pixels.
 
-This was vibe-coded with Codex. The test suite uses generated PDFs, including the fake Joe Farmer return in these screenshots. It covers searchable and scanned pages, rotations, overlapping and partial-word matches, account suffixes, labels, JSON portability, rescans, batch-state privacy, and both current and legacy MCP clients. Export tests run text extraction and OCR again to verify that selected values are gone.
+I vibe-coded this with Codex, but I did not want my tax return anywhere near the test suite. The repo generates fake PDFs, including the Joe Farmer return in these screenshots. After an export, the tests use text extraction and OCR to check that the masked values are actually gone.
 
 Masker is open source. The universal Apple Silicon/Intel app and the optional MCP companion are available from the [latest GitHub release](https://github.com/cpatil/masker/releases/latest).
