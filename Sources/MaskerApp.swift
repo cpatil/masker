@@ -87,9 +87,6 @@ final class MaskerModel: ObservableObject {
 
     private static let recentPDFPathsKey = "recentPDFPaths"
     private static let maskValuesByPDFPathKey = "maskValuesByPDFPath"
-    private static let replacementLabelFontFamilyKey = "replacementLabelFontFamily"
-    private static let replacementLabelFontSizeKey = "replacementLabelFontSize"
-    private static let replacementLabelWidthScaleKey = "replacementLabelWidthScale"
     private static let maximumRecentPDFs = 10
 
     private let userDefaults: UserDefaults
@@ -104,17 +101,6 @@ final class MaskerModel: ObservableObject {
     @Published var generateNameVariants = false
     @Published var detectAccountSuffixes = false
     @Published var accountSuffixExceptions = ""
-    @Published var replaceWithLabels = false
-    @Published var replacementLabelFontFamily = "Helvetica" {
-        didSet { userDefaults.set(replacementLabelFontFamily, forKey: Self.replacementLabelFontFamilyKey) }
-    }
-    @Published var replacementLabelFontSize: CGFloat = 6 {
-        didSet { userDefaults.set(Double(replacementLabelFontSize), forKey: Self.replacementLabelFontSizeKey) }
-    }
-    @Published var replacementLabelWidthScale: CGFloat = 1 {
-        didSet { userDefaults.set(Double(replacementLabelWidthScale), forKey: Self.replacementLabelWidthScaleKey) }
-    }
-    @Published var revealMaskedTextOnHover = false
     @Published var matches: [RedactionMatch] = []
     @Published var selectedMatchID: UUID?
     @Published var activeFileURL: URL?
@@ -137,20 +123,6 @@ final class MaskerModel: ObservableObject {
 
     init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
-        if let storedFont = userDefaults.string(forKey: Self.replacementLabelFontFamilyKey),
-           ["System", "Helvetica", "Avenir Next", "Menlo", "Times New Roman"].contains(storedFont) {
-            replacementLabelFontFamily = storedFont
-        }
-        if userDefaults.object(forKey: Self.replacementLabelFontSizeKey) != nil {
-            replacementLabelFontSize = CGFloat(
-                min(max(userDefaults.double(forKey: Self.replacementLabelFontSizeKey), 3), 12)
-            )
-        }
-        if userDefaults.object(forKey: Self.replacementLabelWidthScaleKey) != nil {
-            replacementLabelWidthScale = CGFloat(
-                min(max(userDefaults.double(forKey: Self.replacementLabelWidthScaleKey), 1), 2)
-            )
-        }
         let storedPaths = userDefaults.stringArray(forKey: Self.recentPDFPathsKey) ?? []
         recentFiles = storedPaths
             .map { URL(fileURLWithPath: $0).standardizedFileURL }
@@ -446,10 +418,6 @@ final class MaskerModel: ObservableObject {
 
         let inputFiles = files
         let reviewedMatches = matches
-        let shouldReplaceWithLabels = replaceWithLabels
-        let labelFontFamily = replacementLabelFontFamily
-        let labelFontSize = replacementLabelFontSize
-        let labelWidthScale = replacementLabelWidthScale
         isBusy = true
         status = "Preparing sanitized copies..."
 
@@ -458,11 +426,7 @@ final class MaskerModel: ObservableObject {
                 let outputs = try PDFMasker.exportSanitizedCopies(
                     files: inputFiles,
                     matches: reviewedMatches,
-                    outputFolder: folder,
-                    replaceWithLabels: shouldReplaceWithLabels,
-                    replacementLabelFontFamily: labelFontFamily,
-                    replacementLabelFontSize: labelFontSize,
-                    replacementLabelWidthScale: labelWidthScale
+                    outputFolder: folder
                 ) { message in
                     DispatchQueue.main.async { self.status = message }
                 }
@@ -482,13 +446,6 @@ final class MaskerModel: ObservableObject {
 
     func selectAll(_ selected: Bool) {
         for index in matches.indices { matches[index].isSelected = selected }
-    }
-
-    func replacementLabel(for match: RedactionMatch) -> String? {
-        let fileMatches = matches.filter {
-            $0.fileURL.standardizedFileURL == match.fileURL.standardizedFileURL
-        }
-        return PDFMasker.replacementLabels(for: fileMatches)[match.id]
     }
 
     func selectCurrentPage(_ selected: Bool) {
@@ -807,44 +764,6 @@ struct ContentView: View {
                             Text("Opt-in: a value such as “JOE AND MARY FARMER” also searches for “JOE FARMER.” Review these matches carefully.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            Divider()
-                            Toggle("Replace black boxes with labels", isOn: $model.replaceWithLabels)
-                            Text("Exports readable placeholders such as <Acct 1> and <Name 1>. Repeated values reuse a label; different account identifiers get different numbers.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            if model.replaceWithLabels {
-                                Picker("Font", selection: $model.replacementLabelFontFamily) {
-                                    ForEach(["System", "Helvetica", "Avenir Next", "Menlo", "Times New Roman"], id: \.self) {
-                                        Text($0).tag($0)
-                                    }
-                                }
-                                .pickerStyle(.menu)
-                                .controlSize(.small)
-
-                                HStack(spacing: 7) {
-                                    Text("Size")
-                                        .font(.caption)
-                                    Slider(value: $model.replacementLabelFontSize, in: 3...12, step: 0.5)
-                                    Text("\(model.replacementLabelFontSize, specifier: "%.1f") pt")
-                                        .font(.caption.monospacedDigit())
-                                        .frame(width: 46, alignment: .trailing)
-                                }
-                                HStack(spacing: 7) {
-                                    Text("Width")
-                                        .font(.caption)
-                                    Slider(value: $model.replacementLabelWidthScale, in: 1...2, step: 0.1)
-                                    Text("\(Int((model.replacementLabelWidthScale * 100).rounded()))%")
-                                        .font(.caption.monospacedDigit())
-                                        .frame(width: 38, alignment: .trailing)
-                                }
-                                Text("Width helps a label fit when the original field is narrow; wide fields still use compact labels.")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Toggle("Reveal masked text on hover", isOn: $model.revealMaskedTextOnHover)
-                            Text("Preview only: temporarily shows the original text with a yellow highlight. Sanitized exports remain masked.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
                         }
                         .padding(.top, 6)
                         .padding(.trailing, 5)
@@ -931,44 +850,54 @@ struct ContentView: View {
 
                 Divider()
 
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        if currentMatchIndices.isEmpty {
-                            HStack {
-                                Image(systemName: model.matches.isEmpty ? "magnifyingglass" : "checkmark.circle")
-                                    .foregroundStyle(.secondary)
-                                Text(model.matches.isEmpty ? "Scan the PDFs to detect matches." : "No detected matches on this page.")
-                                    .font(.callout)
-                                    .foregroundStyle(.secondary)
-                                Spacer()
-                            }
-                            .padding(14)
-                        } else {
-                            ForEach(currentMatchIndices, id: \.self) { index in
-                                HStack(spacing: 10) {
-                                    Toggle("", isOn: $model.matches[index].isSelected)
-                                        .labelsHidden()
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        Text(model.matches[index].category)
-                                            .font(.callout.weight(.semibold))
-                                        Text(model.matches[index].matchedText)
-                                            .font(.system(.callout, design: .monospaced))
-                                            .lineLimit(1)
-                                            .redacted(reason: model.revealDetectedValues ? [] : .privacy)
-                                        if model.replaceWithLabels,
-                                           let label = model.replacementLabel(for: model.matches[index]) {
-                                            Text("Exports as \(label)")
-                                                .font(.caption.monospaced())
-                                                .foregroundStyle(.secondary)
-                                        }
-                                    }
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            if currentMatchIndices.isEmpty {
+                                HStack {
+                                    Image(systemName: model.matches.isEmpty ? "magnifyingglass" : "checkmark.circle")
+                                        .foregroundStyle(.secondary)
+                                    Text(model.matches.isEmpty ? "Scan the PDFs to detect matches." : "No detected matches on this page.")
+                                        .font(.callout)
+                                        .foregroundStyle(.secondary)
                                     Spacer()
                                 }
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 7)
-                                Divider()
-                                    .padding(.leading, 42)
+                                .padding(14)
+                            } else {
+                                ForEach(currentMatchIndices, id: \.self) { index in
+                                    let matchID = model.matches[index].id
+                                    HStack(spacing: 10) {
+                                        RoundedRectangle(cornerRadius: 2)
+                                            .fill(model.selectedMatchID == matchID ? Color.accentColor : Color.clear)
+                                            .frame(width: 3)
+                                        Toggle("", isOn: $model.matches[index].isSelected)
+                                            .labelsHidden()
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(model.matches[index].category)
+                                                .font(.callout.weight(.semibold))
+                                            Text(model.matches[index].matchedText)
+                                                .font(.system(.callout, design: .monospaced))
+                                                .lineLimit(1)
+                                                .redacted(reason: model.revealDetectedValues ? [] : .privacy)
+                                        }
+                                        Spacer()
+                                    }
+                                    .padding(.horizontal, 11)
+                                    .padding(.vertical, 7)
+                                    .background(model.selectedMatchID == matchID ? Color.accentColor.opacity(0.14) : Color.clear)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { model.selectedMatchID = matchID }
+                                    .id(matchID)
+                                    Divider()
+                                        .padding(.leading, 42)
+                                }
                             }
+                        }
+                    }
+                    .onReceive(model.$selectedMatchID.removeDuplicates()) { matchID in
+                        guard let matchID else { return }
+                        withAnimation(.easeOut(duration: 0.18)) {
+                            proxy.scrollTo(matchID, anchor: .center)
                         }
                     }
                 }
@@ -1031,12 +960,8 @@ struct ContentView: View {
                     ContinuousPDFView(
                         fileURL: activeFile,
                         matches: model.matches.filter { $0.fileURL.standardizedFileURL == activeFile.standardizedFileURL },
-                        replaceWithLabels: model.replaceWithLabels,
-                        replacementLabelFontFamily: model.replacementLabelFontFamily,
-                        replacementLabelFontSize: model.replacementLabelFontSize,
-                        replacementLabelWidthScale: model.replacementLabelWidthScale,
-                        revealMaskedTextOnHover: model.revealMaskedTextOnHover,
                         currentPage: $model.currentPreviewPage,
+                        selectedMatchID: $model.selectedMatchID,
                         searchText: model.pdfSearchText,
                         searchResultCount: $model.pdfSearchResultCount,
                         searchResultIndex: $model.pdfSearchResultIndex,
@@ -1151,62 +1076,23 @@ struct ContentView: View {
     }
 }
 
-final class HoverTrackingPDFView: PDFView {
-    var pointerMoved: ((NSEvent) -> Void)?
-    var pointerExited: ((NSEvent) -> Void)?
 #if SNAPSHOT_TEST
-    var revealFirstMaskForTesting: (() -> (PDFPage, PDFAnnotation)?)?
-    var restoreHoverForTesting: (() -> Void)?
+final class MaskPDFView: PDFView {
+    var maskPointHandlerForTesting: ((CGPoint) -> Bool)?
 
-    func simulateFirstMaskRevealForTesting() -> (PDFPage, PDFAnnotation)? {
-        revealFirstMaskForTesting?()
-    }
-
-    func simulatePointerExitForTesting() {
-        restoreHoverForTesting?()
-    }
-#endif
-    private var pointerTrackingArea: NSTrackingArea?
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        window?.acceptsMouseMovedEvents = true
-        updateTrackingAreas()
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let pointerTrackingArea { removeTrackingArea(pointerTrackingArea) }
-        let area = NSTrackingArea(
-            rect: .zero,
-            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(area)
-        pointerTrackingArea = area
-    }
-
-    override func mouseMoved(with event: NSEvent) {
-        super.mouseMoved(with: event)
-        pointerMoved?(event)
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        super.mouseExited(with: event)
-        pointerExited?(event)
+    func simulateMaskClickForTesting(at point: CGPoint) -> Bool {
+        maskPointHandlerForTesting?(point) ?? false
     }
 }
+#else
+typealias MaskPDFView = PDFView
+#endif
 
 struct ContinuousPDFView: NSViewRepresentable {
     let fileURL: URL
     let matches: [RedactionMatch]
-    let replaceWithLabels: Bool
-    let replacementLabelFontFamily: String
-    let replacementLabelFontSize: CGFloat
-    let replacementLabelWidthScale: CGFloat
-    let revealMaskedTextOnHover: Bool
     @Binding var currentPage: Int
+    @Binding var selectedMatchID: UUID?
     let searchText: String
     @Binding var searchResultCount: Int
     @Binding var searchResultIndex: Int
@@ -1220,7 +1106,7 @@ struct ContinuousPDFView: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> PDFView {
-        let pdfView = HoverTrackingPDFView()
+        let pdfView = MaskPDFView()
         pdfView.autoScales = true
         pdfView.displayMode = .singlePageContinuous
         pdfView.displayDirection = .vertical
@@ -1236,13 +1122,8 @@ struct ContinuousPDFView: NSViewRepresentable {
         context.coordinator.updateDocumentIfNeeded(
             fileURL: fileURL,
             matches: matches,
-            replaceWithLabels: replaceWithLabels,
-            replacementLabelFontFamily: replacementLabelFontFamily,
-            replacementLabelFontSize: replacementLabelFontSize,
-            replacementLabelWidthScale: replacementLabelWidthScale,
             requestedPage: currentPage
         )
-        context.coordinator.updateRevealMaskedTextOnHover(revealMaskedTextOnHover)
         context.coordinator.updateSearchIfNeeded(searchText)
         context.coordinator.navigateIfNeeded(token: navigationToken, direction: navigationDirection)
     }
@@ -1272,15 +1153,13 @@ struct ContinuousPDFView: NSViewRepresentable {
         private struct PreviewMaskGroup {
             let page: PDFPage
             let hitRects: [CGRect]
-            let annotations: [PDFAnnotation]
         }
 
         var parent: ContinuousPDFView
         private weak var pdfView: PDFView?
         private var pageObserver: NSObjectProtocol?
+        private var clickMonitor: Any?
         private var previewMasks: [UUID: PreviewMaskGroup] = [:]
-        private var hoveredMatchID: UUID?
-        private var hoverAnnotations: [(PDFPage, PDFAnnotation)] = []
         private var documentSignature = ""
         private var loadedFilePath = ""
         private var lastSearchText = ""
@@ -1299,27 +1178,14 @@ struct ContinuousPDFView: NSViewRepresentable {
 
         func attach(to pdfView: PDFView) {
             self.pdfView = pdfView
-            if let hoverView = pdfView as? HoverTrackingPDFView {
-                hoverView.pointerMoved = { [weak self] event in
-                    self?.handlePointerMoved(event)
-                }
-                hoverView.pointerExited = { [weak self] _ in
-                    self?.restoreHoveredMask()
-                }
 #if SNAPSHOT_TEST
-                hoverView.revealFirstMaskForTesting = { [weak self] in
-                    guard let self,
-                          let document = self.pdfView?.document,
-                          let (matchID, group) = self.previewMasks.first,
-                          let annotation = group.annotations.first else { return nil }
-                    self.restoreHoveredMask()
-                    self.revealMask(matchID, in: document)
-                    return (group.page, annotation)
-                }
-                hoverView.restoreHoverForTesting = { [weak self] in
-                    self?.restoreHoveredMask()
-                }
+            (pdfView as? MaskPDFView)?.maskPointHandlerForTesting = { [weak self] point in
+                self?.handleMaskClick(at: point) ?? false
+            }
 #endif
+            clickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+                guard let self else { return event }
+                return self.handleMaskClick(event) ? nil : event
             }
             pageObserver = NotificationCenter.default.addObserver(
                 forName: .PDFViewPageChanged,
@@ -1331,17 +1197,13 @@ struct ContinuousPDFView: NSViewRepresentable {
         }
 
         func detach() {
-            restoreHoveredMask()
             searchWorkItem?.cancel()
             searchCancellation?.cancel()
-            if let hoverView = pdfView as? HoverTrackingPDFView {
-                hoverView.pointerMoved = nil
-                hoverView.pointerExited = nil
+            if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
+            clickMonitor = nil
 #if SNAPSHOT_TEST
-                hoverView.revealFirstMaskForTesting = nil
-                hoverView.restoreHoverForTesting = nil
+            (pdfView as? MaskPDFView)?.maskPointHandlerForTesting = nil
 #endif
-            }
             if let pageObserver { NotificationCenter.default.removeObserver(pageObserver) }
             pageObserver = nil
         }
@@ -1349,10 +1211,6 @@ struct ContinuousPDFView: NSViewRepresentable {
         func updateDocumentIfNeeded(
             fileURL: URL,
             matches: [RedactionMatch],
-            replaceWithLabels: Bool,
-            replacementLabelFontFamily: String,
-            replacementLabelFontSize: CGFloat,
-            replacementLabelWidthScale: CGFloat,
             requestedPage: Int
         ) {
             guard let pdfView else { return }
@@ -1360,15 +1218,9 @@ struct ContinuousPDFView: NSViewRepresentable {
             let matchPart = matches
                 .map { "\($0.id.uuidString):\($0.isSelected ? 1 : 0)" }
                 .joined(separator: "|")
-            let signature = filePath
-                + "|labels=\(replaceWithLabels ? 1 : 0)"
-                + "|font=\(replacementLabelFontFamily)"
-                + "|size=\(replacementLabelFontSize)"
-                + "|width=\(replacementLabelWidthScale)|"
-                + matchPart
+            let signature = filePath + "|" + matchPart
 
             if signature != documentSignature {
-                restoreHoveredMask()
                 previewMasks = [:]
                 searchWorkItem?.cancel()
                 searchCancellation?.cancel()
@@ -1376,15 +1228,7 @@ struct ContinuousPDFView: NSViewRepresentable {
                 let visiblePage = pdfView.currentPage.flatMap { pdfView.document?.index(for: $0) }
                 let targetPage = loadedFilePath == filePath ? (visiblePage ?? requestedPage) : requestedPage
                 guard let data = try? Data(contentsOf: fileURL), let document = PDFDocument(data: data) else { return }
-                addRedactionAnnotations(
-                    matches.filter(\.isSelected),
-                    allMatches: matches,
-                    replaceWithLabels: replaceWithLabels,
-                    replacementLabelFontFamily: replacementLabelFontFamily,
-                    replacementLabelFontSize: replacementLabelFontSize,
-                    replacementLabelWidthScale: replacementLabelWidthScale,
-                    to: document
-                )
+                addRedactionAnnotations(matches.filter(\.isSelected), to: document)
                 documentSignature = signature
                 loadedFilePath = filePath
                 pdfView.document = document
@@ -1407,32 +1251,19 @@ struct ContinuousPDFView: NSViewRepresentable {
             }
         }
 
-        func updateRevealMaskedTextOnHover(_ enabled: Bool) {
-            pdfView?.window?.acceptsMouseMovedEvents = enabled
-            if !enabled { restoreHoveredMask() }
-        }
-
-        private func handlePointerMoved(_ event: NSEvent) {
-            guard parent.revealMaskedTextOnHover,
-                  let pdfView,
-                  pdfView.document != nil else {
-                restoreHoveredMask()
-                return
-            }
+        private func handleMaskClick(_ event: NSEvent) -> Bool {
+            guard let pdfView,
+                  event.window === pdfView.window else { return false }
             let viewPoint = pdfView.convert(event.locationInWindow, from: nil)
-            guard let page = pdfView.page(for: viewPoint, nearest: true) else {
-                restoreHoveredMask()
-                return
-            }
-            let pagePoint = pdfView.convert(viewPoint, to: page)
-            revealMask(at: pagePoint, on: page)
+            return handleMaskClick(at: viewPoint)
         }
 
-        private func revealMask(at pagePoint: CGPoint, on page: PDFPage) {
-            guard let document = pdfView?.document else {
-                restoreHoveredMask()
-                return
-            }
+        private func handleMaskClick(at viewPoint: CGPoint) -> Bool {
+            guard let pdfView,
+                  pdfView.bounds.contains(viewPoint),
+                  pdfView.document != nil,
+                  let page = pdfView.page(for: viewPoint, nearest: true) else { return false }
+            let pagePoint = pdfView.convert(viewPoint, to: page)
             let candidates = previewMasks.filter { _, group in
                 group.page === page && group.hitRects.contains(where: { $0.contains(pagePoint) })
             }
@@ -1441,11 +1272,17 @@ struct ContinuousPDFView: NSViewRepresentable {
                 let rightArea = rhs.value.hitRects.map { $0.width * $0.height }.min() ?? .greatestFiniteMagnitude
                 return leftArea < rightArea
             }?.key
-            guard let matchID else {
-                restoreHoveredMask()
-                return
+            guard let matchID else { return false }
+            selectMask(matchID, on: page)
+            return true
+        }
+
+        private func selectMask(_ matchID: UUID, on page: PDFPage) {
+            if let document = pdfView?.document {
+                let pageIndex = document.index(for: page)
+                if pageIndex != NSNotFound { parent.currentPage = pageIndex }
             }
-            revealMask(matchID, in: document)
+            parent.selectedMatchID = matchID
         }
 
         func updateSearchIfNeeded(_ query: String) {
@@ -1582,141 +1419,28 @@ struct ContinuousPDFView: NSViewRepresentable {
 
         private func addRedactionAnnotations(
             _ matches: [RedactionMatch],
-            allMatches: [RedactionMatch],
-            replaceWithLabels: Bool,
-            replacementLabelFontFamily: String,
-            replacementLabelFontSize: CGFloat,
-            replacementLabelWidthScale: CGFloat,
             to document: PDFDocument
         ) {
-            let labelsByMatchID = replaceWithLabels ? PDFMasker.replacementLabels(for: allMatches) : [:]
-            var placementsByMatchID: [UUID: PDFMasker.ReplacementLabelPlacement] = [:]
-            if replaceWithLabels {
-                for (pageIndex, pageMatches) in Dictionary(grouping: matches, by: \.pageIndex) {
-                    guard let page = document.page(at: pageIndex) else { continue }
-                    let placements = PDFMasker.replacementLabelPlacements(
-                        for: pageMatches,
-                        labelsByMatchID: labelsByMatchID,
-                        on: page,
-                        fontFamily: replacementLabelFontFamily,
-                        fontSize: replacementLabelFontSize,
-                        widthScale: replacementLabelWidthScale
-                    )
-                    for placement in placements {
-                        placementsByMatchID[placement.matchID] = placement
-                    }
-                }
-            }
             for match in matches {
                 guard let page = document.page(at: match.pageIndex) else { continue }
-                let safeRects = PDFMasker.safeRedactionRects(match.rects, on: page)
-                let pageRects = safeRects.map {
+                let pageRects = PDFMasker.safeRedactionRects(match.rects, on: page).map {
                     pageRect(for: $0, on: page).insetBy(dx: -0.5, dy: -0.5)
                 }
-                var maskAnnotations: [PDFAnnotation] = []
                 for pageRect in pageRects {
                     let annotation = PDFAnnotation(bounds: pageRect, forType: .square, withProperties: nil)
-                    annotation.color = replaceWithLabels ? .white : .black
-                    annotation.interiorColor = replaceWithLabels ? .white : .black
+                    annotation.color = .black
+                    annotation.interiorColor = .black
                     annotation.shouldDisplay = true
                     annotation.shouldPrint = true
                     let border = PDFBorder()
                     border.lineWidth = 0
                     annotation.border = border
                     page.addAnnotation(annotation)
-                    maskAnnotations.append(annotation)
-                }
-                if replaceWithLabels,
-                   let placement = placementsByMatchID[match.id] {
-                    let pageRect = pageRect(for: placement.rect, on: page).insetBy(dx: -0.25, dy: -0.25)
-                    let label = placement.label
-                    let annotation = PDFAnnotation(
-                        bounds: pageRect,
-                        forType: .freeText,
-                        withProperties: nil
-                    )
-                    annotation.contents = label
-                    annotation.font = replacementFont(
-                        for: label,
-                        in: pageRect,
-                        family: replacementLabelFontFamily,
-                        preferredSize: replacementLabelFontSize
-                    )
-                    annotation.fontColor = NSColor(calibratedWhite: 0.16, alpha: 1)
-                    annotation.color = .clear
-                    annotation.interiorColor = NSColor(calibratedWhite: 0.985, alpha: 1)
-                    annotation.alignment = .center
-                    annotation.shouldDisplay = true
-                    annotation.shouldPrint = true
-                    let border = PDFBorder()
-                    border.lineWidth = 0
-                    annotation.border = border
-                    page.addAnnotation(annotation)
-                    maskAnnotations.append(annotation)
                 }
                 if !pageRects.isEmpty {
-                    previewMasks[match.id] = PreviewMaskGroup(
-                        page: page,
-                        hitRects: pageRects,
-                        annotations: maskAnnotations
-                    )
+                    previewMasks[match.id] = PreviewMaskGroup(page: page, hitRects: pageRects)
                 }
             }
-        }
-
-        private func revealMask(_ matchID: UUID, in document: PDFDocument) {
-            guard hoveredMatchID != matchID,
-                  let group = previewMasks[matchID],
-                  document.index(for: group.page) != NSNotFound else { return }
-            restoreHoveredMask()
-            for annotation in group.annotations { group.page.removeAnnotation(annotation) }
-            var installed: [(PDFPage, PDFAnnotation)] = []
-            for rect in group.hitRects {
-                let highlight = PDFAnnotation(bounds: rect, forType: .square, withProperties: nil)
-                highlight.color = .systemOrange
-                highlight.interiorColor = NSColor.systemYellow.withAlphaComponent(0.22)
-                highlight.shouldDisplay = true
-                highlight.shouldPrint = false
-                let border = PDFBorder()
-                border.lineWidth = 1.5
-                highlight.border = border
-                group.page.addAnnotation(highlight)
-                installed.append((group.page, highlight))
-            }
-            hoveredMatchID = matchID
-            hoverAnnotations = installed
-            pdfView?.annotationsChanged(on: group.page)
-            pdfView?.needsDisplay = true
-        }
-
-        private func restoreHoveredMask() {
-            if let hoveredMatchID, let group = previewMasks[hoveredMatchID] {
-                for annotation in group.annotations { group.page.addAnnotation(annotation) }
-                pdfView?.annotationsChanged(on: group.page)
-            }
-            for (page, annotation) in hoverAnnotations {
-                page.removeAnnotation(annotation)
-                pdfView?.annotationsChanged(on: page)
-            }
-            hoveredMatchID = nil
-            hoverAnnotations = []
-            pdfView?.needsDisplay = true
-        }
-
-        private func replacementFont(
-            for label: String,
-            in rect: CGRect,
-            family: String,
-            preferredSize: CGFloat
-        ) -> NSFont {
-            var size = min(max(preferredSize, 2.5), max(rect.height * 0.72, 2.5))
-            var font = PDFMasker.replacementNSFont(family: family, size: size)
-            let measured = (label as NSString).size(withAttributes: [.font: font]).width
-            if measured > rect.width - 2 {
-                size = max(2.5, size * max(rect.width - 3, 1) / max(measured, 1))
-                font = PDFMasker.replacementNSFont(family: family, size: size)
-            }
-            return font
         }
 
         private func installSearchAnnotations() {

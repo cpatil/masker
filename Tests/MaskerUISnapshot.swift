@@ -36,9 +36,6 @@ struct MaskerUISnapshot {
         let seedModel = MaskerModel(userDefaults: testDefaults)
         seedModel.addFiles([input])
         seedModel.exactValues = "JOE AND MARY FARMER\n444-55-6666"
-        seedModel.replacementLabelFontFamily = "Menlo"
-        seedModel.replacementLabelFontSize = 5
-        seedModel.replacementLabelWidthScale = 1.2
         seedModel.stashMaskValuesForLoadedFiles()
 
         let model = MaskerModel(userDefaults: testDefaults)
@@ -48,19 +45,11 @@ struct MaskerUISnapshot {
             model.exactValues == "JOE AND MARY FARMER\n444-55-6666",
             "Saved mask values were not restored with the recent PDF"
         )
-        precondition(
-            model.replacementLabelFontFamily == "Menlo" &&
-                model.replacementLabelFontSize == 5 &&
-                model.replacementLabelWidthScale == 1.2,
-            "Replacement label appearance settings were not restored"
-        )
         model.outputFolder = URL(fileURLWithPath: "/Users/example/Documents/Masked PDFs", isDirectory: true)
         model.detectEmail = true
         model.detectPhone = true
         model.generateNameVariants = true
         model.detectAccountSuffixes = true
-        model.replaceWithLabels = true
-        model.revealMaskedTextOnHover = true
         model.accountSuffixExceptions = "FORM 8879"
         var reviewMatches = matches
         if let index = reviewMatches.firstIndex(where: {
@@ -134,23 +123,32 @@ struct MaskerUISnapshot {
                 $0 + (document.page(at: $1)?.annotations.count ?? 0)
             }
             FileHandle.standardError.write(Data("PDFView pages=\(document.pageCount) annotations=\(annotationCount)\n".utf8))
-            guard let hoverView = pdfView as? HoverTrackingPDFView,
-                  let (hoverPage, previewMask) = hoverView.simulateFirstMaskRevealForTesting() else {
-                preconditionFailure("Could not find a preview mask to test hover reveal")
-            }
-            do {
-                precondition(
-                    !hoverPage.annotations.contains(where: { $0 === previewMask }),
-                    "Hovering did not remove the preview mask"
+            model.selectedMatchID = nil
+            let target = reviewMatches.compactMap { match -> (PDFPage, CGRect)? in
+                guard match.isSelected,
+                      let displayRect = match.rects.first,
+                      let page = document.page(at: match.pageIndex) else { return nil }
+                let transform = page.transform(for: .mediaBox)
+                let transformedBounds = page.bounds(for: .mediaBox).applying(transform).standardized
+                let transformedRect = displayRect.offsetBy(
+                    dx: transformedBounds.minX,
+                    dy: transformedBounds.minY
                 )
-                hoverView.simulatePointerExitForTesting()
-                RunLoop.current.run(until: Date().addingTimeInterval(0.1))
-                precondition(
-                    hoverPage.annotations.contains(where: { $0 === previewMask }),
-                    "Leaving the mask did not restore the preview mask"
-                )
-                FileHandle.standardError.write(Data("PASS hoverReveal\n".utf8))
+                return (page, transformedRect.applying(transform.inverted()).standardized)
+            }.first
+            guard let maskView = pdfView as? MaskPDFView,
+                  let (clickPage, clickRect) = target else {
+                preconditionFailure("Could not find a preview mask to click")
             }
+            let clickPoint = pdfView.convert(
+                CGPoint(x: clickRect.midX, y: clickRect.midY),
+                from: clickPage
+            )
+            let clickHandled = maskView.simulateMaskClickForTesting(at: clickPoint)
+            precondition(clickHandled, "Preview mask hit testing failed")
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            precondition(model.selectedMatchID != nil, "Clicking a mask did not select its review row")
+            FileHandle.standardError.write(Data("PASS maskClickSelection\n".utf8))
 
             if let page = document.page(at: 0) {
                 let thumbnail = page.thumbnail(of: NSSize(width: 918, height: 1188), for: .mediaBox)

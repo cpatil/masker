@@ -19,11 +19,10 @@ Read the short development story: [I vibe-coded a PDF redactor because I needed 
 - Compact nine-digit variants when a formatted SSN/ITIN or EIN is found.
 - Opt-in first-and-last name variants: `JOE AND MARY FARMER` can also find `Joe Farmer`.
 - Opt-in institution account-suffix detection that keeps names such as `MERRILL LYNCH` and right-aligned table amounts visible.
-- Optional replacement labels such as `<Acct 1>` and `<Name 1>` instead of solid black boxes. Repeated identities reuse a label, while different account identifiers receive different numbers.
 - Line-scoped exceptions for false positives such as `FORM 8879`.
 - Search-as-you-type with previous/next navigation and cached on-device OCR; selected masks are omitted from results.
 - A local Recent PDFs list that restores each PDF's saved exact mask values and can import or export them as JSON.
-- Continuous-scroll review with matches synchronized to the visible page.
+- Continuous-scroll review with matches synchronized to the visible page; clicking a black mask selects and scrolls to its review row.
 - Permanent export that removes the original text layer, forms, annotations, attachments, scripts, layers, and metadata.
 
 ## Try it
@@ -43,7 +42,7 @@ cd masker
 open Masker.app
 ```
 
-The build uses SwiftUI, PDFKit, Vision, Core Graphics, and Core Text from macOS.
+The build uses SwiftUI, PDFKit, Vision, and Core Graphics from macOS.
 
 Maintainers can create the universal release archive with `./package-release.sh`.
 
@@ -55,14 +54,13 @@ Maintainers can create the universal release archive with `./package-release.sh`
 4. Click **Scan PDFs Locally**.
 5. Scroll through the PDF and uncheck anything that should remain visible.
 6. Search for possible variants; use **Add & Rescan** when you find another value to remove.
-7. Optionally enable **Replace black boxes with labels**.
-8. Click **Create Sanitized Copies**.
+7. Click **Create Sanitized Copies**.
 
 Masker never overwrites an original. Output names end in `_masked.pdf`; if that name exists, a number is added.
 
 ## What "permanent" means
 
-Each exported page is rebuilt from sanitized pixels at 300 DPI using Core Graphics. The original PDF objects are not copied into the output. Replacement labels, when enabled, are drawn only after the original pixels are removed. Masker then reopens the result, verifies that active content is gone, and compares the coarse visual structure of every page with the expected masked source before reporting success.
+Each exported page is rebuilt from sanitized pixels at 300 DPI using Core Graphics. The original PDF objects are not copied into the output. Masker then reopens the result, verifies that active content is gone, and compares the coarse visual structure of every page with the expected masked source before reporting success.
 
 This intentionally removes the searchable and editable text layer. Preview and other apps may still use OCR to search text that remains visibly rendered on the page; masked values are removed from those pixels. Rasterization also increases file size compared with object-level redaction.
 
@@ -82,7 +80,7 @@ This intentionally removes the searchable and editable text layer. Preview and o
 ./test.sh
 ```
 
-The self-test generates its own searchable, scanned, and rotated PDFs. It covers the `JOE AND MARY FARMER` to `Joe Farmer` name variant, stable generic replacement labels, distinct same-firm account labels, identifier variants, institution suffixes, exceptions, cached OCR search, permanent export, and residual-text checks. No tax documents or private fixtures are stored in this repository.
+The self-test generates its own searchable, scanned, and rotated PDFs. It covers the `JOE AND MARY FARMER` to `Joe Farmer` name variant, identifier variants, institution suffixes, exceptions, cached OCR search, click-to-review selection, permanent export, and residual-text checks. No tax documents or private fixtures are stored in this repository.
 
 An optional local-only corpus test is also available:
 

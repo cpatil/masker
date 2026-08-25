@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.6 - 2026-08-24
+
+- Removes replacement labels and reveal-on-hover, returning preview and export to consistent black masks.
+- Clicking a mask now selects, highlights, and scrolls to its corresponding review row.
+- Deletes the retired label layout, font, preference, hover tracking, rendering, validation, and test paths.
+
 ## 1.4.5 - 2026-08-24
 
 - Replaces stretched gray replacement bars with compact, intrinsic-size labels on an almost-white background.

@@ -85,61 +85,6 @@ struct MaskerSelfTest {
             accountSuffixes.filter { $0 == "2759" }.count == 2,
             "CHARLES SCHWAB 2759 STC should be detected in addition to VANGUARD #2759"
         )
-        let replacementLabels = PDFMasker.replacementLabels(for: matches)
-        let fullFarmerMatch = matches.first {
-            $0.matchedText.caseInsensitiveCompare(fullFarmerName) == .orderedSame
-        }
-        try require(
-            fullFarmerMatch.flatMap { replacementLabels[$0.id] } ==
-                joeFarmerMatches.first.flatMap { replacementLabels[$0.id] },
-            "The full name and its generated variant did not reuse the same replacement label"
-        )
-        let merrill2396 = matches.first { $0.category.hasPrefix("Account suffix") && $0.matchedText == "2396" }
-        let merrill9550 = matches.first { $0.category.hasPrefix("Account suffix") && $0.matchedText == "9550" }
-        try require(
-            merrill2396.flatMap { replacementLabels[$0.id] } !=
-                merrill9550.flatMap { replacementLabels[$0.id] },
-            "Two Merrill Lynch account suffixes received the same replacement label"
-        )
-        let repeated2396Labels = Set(matches
-            .filter { $0.category.hasPrefix("Account suffix") && $0.matchedText == "2396" }
-            .compactMap { replacementLabels[$0.id] })
-        try require(repeated2396Labels.count == 1, "Repeated same-institution account identifiers did not reuse one label")
-        let crossInstitution2759Labels = Set(matches
-            .filter { $0.category.hasPrefix("Account suffix") && $0.matchedText == "2759" }
-            .compactMap { replacementLabels[$0.id] })
-        try require(crossInstitution2759Labels.count == 2, "Different institutions sharing a suffix reused one label")
-        try require(
-            PDFMasker.replacementLabelForDisplay("<Value 12>", in: CGRect(x: 0, y: 0, width: 22, height: 9)) == "<V12>",
-            "Narrow replacement labels were not compacted"
-        )
-        if let sourceDocument = PDFDocument(url: source),
-           let firstPage = sourceDocument.page(at: 0) {
-            let placements = PDFMasker.replacementLabelPlacements(
-                for: matches.filter { $0.pageIndex == 0 },
-                labelsByMatchID: replacementLabels,
-                on: firstPage
-            )
-            if let fullFarmerMatch,
-               let fullNamePlacement = placements.first(where: { $0.matchID == fullFarmerMatch.id }),
-               let sourceWidth = fullFarmerMatch.rects.first?.width {
-                try require(
-                    fullNamePlacement.rect.width < sourceWidth * 0.6,
-                    "A replacement label still stretches across a wide source field"
-                )
-            }
-            for leftIndex in placements.indices {
-                for rightIndex in placements.indices where rightIndex > leftIndex {
-                    let left = placements[leftIndex].rect
-                    let right = placements[rightIndex].rect
-                    let intersection = left.intersection(right)
-                    guard !intersection.isNull else { continue }
-                    let overlap = intersection.width * intersection.height
-                    let smaller = min(left.width * left.height, right.width * right.height)
-                    try require(smaller == 0 || overlap / smaller <= 0.35, "Replacement labels still overlap")
-                }
-            }
-        }
         try require(
             !accountSuffixes.contains("1040") && !accountSuffixes.contains("2025") &&
                 !accountSuffixes.contains("8879") && !accountSuffixes.contains("777"),
@@ -275,62 +220,6 @@ struct MaskerSelfTest {
         try require((0..<output.pageCount).allSatisfy { (output.page(at: $0)?.string ?? "").isEmpty }, "Output still has a text layer")
         try require((0..<output.pageCount).allSatisfy { output.page(at: $0)?.annotations.isEmpty == true }, "Output still has annotations")
 
-        let labeledOutputs = root.appendingPathComponent("labeled-outputs", isDirectory: true)
-        let labeled = try PDFMasker.exportSanitizedCopies(
-            files: [source],
-            matches: matches,
-            outputFolder: labeledOutputs,
-            replaceWithLabels: true,
-            replacementLabelFontFamily: "Menlo",
-            replacementLabelFontSize: 5,
-            replacementLabelWidthScale: 1.2,
-            progress: { _ in }
-        )
-        try require(labeled.count == 1, "Expected one labeled output")
-        guard let labeledOutput = PDFDocument(url: labeled[0]) else { fatalError("Could not reopen labeled output") }
-        try require(labeledOutput.pageCount == 5, "Labeled output changed the page count")
-        try require(
-            (0..<labeledOutput.pageCount).allSatisfy { (labeledOutput.page(at: $0)?.string ?? "").isEmpty },
-            "Labeled output unexpectedly contains a searchable text layer"
-        )
-        try require(
-            (0..<labeledOutput.pageCount).allSatisfy { labeledOutput.page(at: $0)?.annotations.isEmpty == true },
-            "Labeled output still has live annotations"
-        )
-        let labeledResidual = PDFMasker.scan(
-            files: labeled,
-            exactTerms: [
-                "Example Person", fullFarmerName, joeFarmerVariant,
-                "123-45-6789", "123456789", "444-55-6666", "555-66-7777",
-                "98-7654321", "987654321", "alpha@example.com", "(415) 555-0198"
-            ] + expectedSuffixes,
-            options: PatternOptions(
-                detectSSN: true,
-                detectEIN: true,
-                detectEmail: true,
-                detectPhone: true,
-                generateNameVariants: true,
-                detectAccountSuffixes: true
-            ),
-            progress: { _ in }
-        )
-        try require(
-            labeledResidual.isEmpty,
-            "OCR found original sensitive text in the labeled output: \(labeledResidual.map(\.matchedText))"
-        )
-        for (pageIndex, filename) in [(0, "labeled-name-preview.png"), (3, "labeled-account-preview.png")] {
-            if let labeledPreview = PDFMasker.previewImage(
-                fileURL: source,
-                pageIndex: pageIndex,
-                matches: matches,
-                replaceWithLabels: true,
-                dpi: 180
-            ), let cgImage = labeledPreview.cgImage(forProposedRect: nil, context: nil, hints: nil),
-               let data = NSBitmapImageRep(cgImage: cgImage).representation(using: .png, properties: [:]) {
-                try data.write(to: root.appendingPathComponent(filename))
-            }
-        }
-
         let corruptOutput = root.appendingPathComponent("deliberately-corrupted-output.pdf")
         try makeVisuallyCorruptedPDF(at: corruptOutput, pageCount: 5)
         guard let sourceDocument = PDFDocument(url: source) else { fatalError("Could not reopen source") }
@@ -382,7 +271,7 @@ struct MaskerSelfTest {
 
         report("PASS source=\(source.path)")
         report("PASS output=\(created[0].path)")
-        report("PASS matches=\(matches.count) residual=\(residual.count) labeledResidual=\(labeledResidual.count)")
+        report("PASS matches=\(matches.count) residual=\(residual.count)")
     }
 
     private static func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {

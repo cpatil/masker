@@ -1,18 +1,8 @@
 import AppKit
 import CoreGraphics
-import CoreText
 import Foundation
 import PDFKit
 import Vision
-
-enum ReplacementKind: String, Codable, CaseIterable {
-    case account = "Acct"
-    case name = "Name"
-    case identifier = "ID"
-    case email = "Email"
-    case phone = "Phone"
-    case value = "Value"
-}
 
 struct RedactionMatch: Identifiable {
     let id: UUID
@@ -21,8 +11,6 @@ struct RedactionMatch: Identifiable {
     let category: String
     let matchedText: String
     let rects: [CGRect]
-    let replacementKind: ReplacementKind?
-    let replacementKey: String?
     var isSelected: Bool
 
     init(
@@ -32,8 +20,6 @@ struct RedactionMatch: Identifiable {
         category: String,
         matchedText: String,
         rects: [CGRect],
-        replacementKind: ReplacementKind? = nil,
-        replacementKey: String? = nil,
         isSelected: Bool = true
     ) {
         self.id = id
@@ -42,8 +28,6 @@ struct RedactionMatch: Identifiable {
         self.category = category
         self.matchedText = matchedText
         self.rects = rects
-        self.replacementKind = replacementKind
-        self.replacementKey = replacementKey
         self.isSelected = isSelected
     }
 }
@@ -79,23 +63,6 @@ enum MaskerError: LocalizedError {
 }
 
 enum PDFMasker {
-    private struct ReplacementOverlay {
-        let matchID: UUID
-        let rects: [CGRect]
-        let label: String
-    }
-
-    private struct ReplacementPlacementCandidate {
-        let placement: ReplacementLabelPlacement
-        let sourceRect: CGRect
-    }
-
-    struct ReplacementLabelPlacement {
-        let matchID: UUID
-        let rect: CGRect
-        let label: String
-    }
-
     private final class OCRPageCacheEntry: NSObject {
         let observations: [VNRecognizedTextObservation]
 
@@ -114,15 +81,12 @@ enum PDFMasker {
     private struct PatternRule {
         let label: String
         let expression: String
-        let replacementKind: ReplacementKind
     }
 
     private struct SearchRule {
         let label: String
         let value: String
         let requiresDigitBoundaries: Bool
-        let replacementKind: ReplacementKind
-        let replacementKey: String
     }
 
     static func scan(
@@ -212,10 +176,6 @@ enum PDFMasker {
         files: [URL],
         matches: [RedactionMatch],
         outputFolder: URL,
-        replaceWithLabels: Bool = false,
-        replacementLabelFontFamily: String = "Helvetica",
-        replacementLabelFontSize: CGFloat = 6,
-        replacementLabelWidthScale: CGFloat = 1,
         dpi: CGFloat = 300,
         progress: @escaping (String) -> Void
     ) throws -> [URL] {
@@ -223,13 +183,11 @@ enum PDFMasker {
         var outputs: [URL] = []
 
         for fileURL in files {
-            let allFileMatches = matches.filter {
-                $0.fileURL.standardizedFileURL == fileURL.standardizedFileURL
+            let fileMatches = matches.filter {
+                $0.fileURL.standardizedFileURL == fileURL.standardizedFileURL && $0.isSelected
             }
-            let fileMatches = allFileMatches.filter(\.isSelected)
             guard !fileMatches.isEmpty else { continue }
             guard let document = PDFDocument(url: fileURL) else { throw MaskerError.cannotOpen(fileURL) }
-            let labelsByMatchID = replaceWithLabels ? replacementLabels(for: allFileMatches) : [:]
 
             let outputURL = uniqueOutputURL(for: fileURL, in: outputFolder)
             guard let consumer = CGDataConsumer(url: outputURL as CFURL) else {
@@ -261,22 +219,7 @@ enum PDFMasker {
                         let redactionRects = fileMatches
                             .filter { $0.pageIndex == pageIndex }
                             .flatMap(\.rects)
-                        let replacementOverlays = fileMatches
-                            .filter { $0.pageIndex == pageIndex }
-                            .compactMap { match -> ReplacementOverlay? in
-                                guard let label = labelsByMatchID[match.id] else { return nil }
-                                return ReplacementOverlay(matchID: match.id, rects: match.rects, label: label)
-                            }
-
-                        guard let image = renderPage(
-                            page,
-                            dpi: dpi,
-                            redactionRects: redactionRects,
-                            replacementOverlays: replacementOverlays,
-                            replacementLabelFontFamily: replacementLabelFontFamily,
-                            replacementLabelFontSize: replacementLabelFontSize,
-                            replacementLabelWidthScale: replacementLabelWidthScale
-                        ) else {
+                        guard let image = renderPage(page, dpi: dpi, redactionRects: redactionRects) else {
                             context.endPDFPage()
                             throw MaskerError.cannotRender(page: pageIndex, file: fileURL)
                         }
@@ -298,11 +241,7 @@ enum PDFMasker {
             if let validationFailure = sanitizedOutputValidationFailure(
                 outputURL,
                 sourceDocument: document,
-                matches: fileMatches,
-                labelsByMatchID: labelsByMatchID,
-                replacementLabelFontFamily: replacementLabelFontFamily,
-                replacementLabelFontSize: replacementLabelFontSize,
-                replacementLabelWidthScale: replacementLabelWidthScale
+                matches: fileMatches
             ) {
                 try? FileManager.default.removeItem(at: outputURL)
                 throw MaskerError.outputValidationFailed(outputURL, validationFailure)
@@ -317,29 +256,11 @@ enum PDFMasker {
         fileURL: URL,
         pageIndex: Int,
         matches: [RedactionMatch],
-        replaceWithLabels: Bool = false,
-        replacementLabelFontFamily: String = "Helvetica",
-        replacementLabelFontSize: CGFloat = 6,
-        replacementLabelWidthScale: CGFloat = 1,
         dpi: CGFloat = 110
     ) -> NSImage? {
         guard let document = PDFDocument(url: fileURL), let page = document.page(at: pageIndex) else { return nil }
-        let pageMatches = matches.filter { $0.pageIndex == pageIndex && $0.isSelected }
-        let rects = pageMatches.flatMap(\.rects)
-        let labelsByMatchID = replaceWithLabels ? replacementLabels(for: matches) : [:]
-        let overlays = pageMatches.compactMap { match -> ReplacementOverlay? in
-            guard let label = labelsByMatchID[match.id] else { return nil }
-            return ReplacementOverlay(matchID: match.id, rects: match.rects, label: label)
-        }
-        guard let cgImage = renderPage(
-            page,
-            dpi: dpi,
-            redactionRects: rects,
-            replacementOverlays: overlays,
-            replacementLabelFontFamily: replacementLabelFontFamily,
-            replacementLabelFontSize: replacementLabelFontSize,
-            replacementLabelWidthScale: replacementLabelWidthScale
-        ) else { return nil }
+        let rects = matches.filter { $0.pageIndex == pageIndex && $0.isSelected }.flatMap(\.rects)
+        guard let cgImage = renderPage(page, dpi: dpi, redactionRects: rects) else { return nil }
         return NSImage(cgImage: cgImage, size: displayBounds(for: page).size)
     }
 
@@ -389,9 +310,7 @@ enum PDFMasker {
                     fileURL: fileURL,
                     pageIndex: pageIndex,
                     category: rule.label,
-                    text: nsText.substring(with: found),
-                    replacementKind: rule.replacementKind,
-                    replacementKey: rule.replacementKey
+                    text: nsText.substring(with: found)
                 ) {
                     matches.append(match)
                 }
@@ -410,12 +329,7 @@ enum PDFMasker {
                     fileURL: fileURL,
                     pageIndex: pageIndex,
                     category: rule.label,
-                    text: nsText.substring(with: result.range),
-                    replacementKind: rule.replacementKind,
-                    replacementKey: normalizedReplacementKey(
-                        nsText.substring(with: result.range),
-                        kind: rule.replacementKind
-                    )
+                    text: nsText.substring(with: result.range)
                 ) {
                     matches.append(match)
                 }
@@ -439,9 +353,7 @@ enum PDFMasker {
         fileURL: URL,
         pageIndex: Int,
         category: String,
-        text: String,
-        replacementKind: ReplacementKind? = nil,
-        replacementKey: String? = nil
+        text: String
     ) -> RedactionMatch? {
         guard let selection = page.selection(for: range) else { return nil }
         let lineSelections = selection.selectionsByLine()
@@ -461,9 +373,7 @@ enum PDFMasker {
             pageIndex: pageIndex,
             category: category,
             matchedText: text,
-            rects: rects,
-            replacementKind: replacementKind,
-            replacementKey: replacementKey
+            rects: rects
         )
     }
 
@@ -504,9 +414,7 @@ enum PDFMasker {
                             fileURL: fileURL,
                             pageIndex: pageIndex,
                             category: rule.label + " (OCR)",
-                            text: nsLine.substring(with: found),
-                            replacementKind: rule.replacementKind,
-                            replacementKey: rule.replacementKey
+                            text: nsLine.substring(with: found)
                         ))
                     }
                     let nextLocation = found.location + max(found.length, 1)
@@ -526,12 +434,7 @@ enum PDFMasker {
                         fileURL: fileURL,
                         pageIndex: pageIndex,
                         category: rule.label + " (OCR)",
-                        text: nsLine.substring(with: result.range),
-                        replacementKind: rule.replacementKind,
-                        replacementKey: normalizedReplacementKey(
-                            nsLine.substring(with: result.range),
-                            kind: rule.replacementKind
-                        )
+                        text: nsLine.substring(with: result.range)
                     ))
                 }
             }
@@ -546,9 +449,7 @@ enum PDFMasker {
                     fileURL: fileURL,
                     pageIndex: pageIndex,
                     category: "Account suffix (OCR)",
-                    text: nsLine.substring(with: suffix),
-                    replacementKind: .account,
-                    replacementKey: accountReplacementKey(in: line, suffixRange: suffix)
+                    text: nsLine.substring(with: suffix)
                 ))
             }
         }
@@ -601,9 +502,7 @@ enum PDFMasker {
         fileURL: URL,
         pageIndex: Int,
         category: String,
-        text: String,
-        replacementKind: ReplacementKind? = nil,
-        replacementKey: String? = nil
+        text: String
     ) -> RedactionMatch {
         let rect = CGRect(
             x: box.minX * displaySize.width,
@@ -616,41 +515,23 @@ enum PDFMasker {
             pageIndex: pageIndex,
             category: category,
             matchedText: text,
-            rects: [rect],
-            replacementKind: replacementKind,
-            replacementKey: replacementKey
+            rects: [rect]
         )
     }
 
     private static func patternRules(_ options: PatternOptions) -> [PatternRule] {
         var rules: [PatternRule] = []
         if options.detectSSN {
-            rules.append(PatternRule(
-                label: "SSN / ITIN",
-                expression: #"\b\d{3}[ -]\d{2}[ -]\d{4}\b"#,
-                replacementKind: .identifier
-            ))
+            rules.append(PatternRule(label: "SSN / ITIN", expression: #"\b\d{3}[ -]\d{2}[ -]\d{4}\b"#))
         }
         if options.detectEIN {
-            rules.append(PatternRule(
-                label: "EIN",
-                expression: #"\b\d{2}-\d{7}\b"#,
-                replacementKind: .identifier
-            ))
+            rules.append(PatternRule(label: "EIN", expression: #"\b\d{2}-\d{7}\b"#))
         }
         if options.detectEmail {
-            rules.append(PatternRule(
-                label: "Email",
-                expression: #"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"#,
-                replacementKind: .email
-            ))
+            rules.append(PatternRule(label: "Email", expression: #"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"#))
         }
         if options.detectPhone {
-            rules.append(PatternRule(
-                label: "Phone",
-                expression: #"(?<!\d)(?:\+?1[ .-]?)?(?:\(\d{3}\)|\d{3})[ .-]\d{3}[ .-]\d{4}(?!\d)"#,
-                replacementKind: .phone
-            ))
+            rules.append(PatternRule(label: "Phone", expression: #"(?<!\d)(?:\+?1[ .-]?)?(?:\(\d{3}\)|\d{3})[ .-]\d{3}[ .-]\d{4}(?!\d)"#))
         }
         return rules
     }
@@ -693,9 +574,7 @@ enum PDFMasker {
                 fileURL: fileURL,
                 pageIndex: pageIndex,
                 category: "Account suffix",
-                text: nsText.substring(with: suffixRange),
-                replacementKind: .account,
-                replacementKey: accountReplacementKey(in: line, suffixRange: detectedSuffix)
+                text: nsText.substring(with: suffixRange)
             )
         }
     }
@@ -786,26 +665,6 @@ enum PDFMasker {
             .uppercased()
     }
 
-    private static func accountReplacementKey(in line: String, suffixRange: NSRange) -> String {
-        let nsLine = line as NSString
-        let prefix = nsLine.substring(to: suffixRange.location)
-        var words = prefix
-            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            .uppercased()
-            .split(whereSeparator: { !$0.isLetter })
-            .map(String.init)
-        let legalSuffixes: Set<String> = [
-            "CO", "COMPANY", "CORP", "CORPORATION", "INC", "INCORPORATED",
-            "LLC", "LLP", "LTD", "LIMITED"
-        ]
-        while let last = words.last, legalSuffixes.contains(last) {
-            words.removeLast()
-        }
-        let institution = words.joined(separator: " ")
-        let suffix = nsLine.substring(with: suffixRange).filter(\.isNumber)
-        return institution.isEmpty ? suffix : institution + "|" + suffix
-    }
-
     private static func searchRules(for exactTerms: [String], options: PatternOptions) -> [SearchRule] {
         var rules: [SearchRule] = []
         var seen = Set<String>()
@@ -814,28 +673,14 @@ enum PDFMasker {
             let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
             let exactKey = trimmed.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            let replacementKind = replacementKind(forExactTerm: trimmed)
-            let replacementKey = normalizedReplacementKey(trimmed, kind: replacementKind)
             if seen.insert(exactKey).inserted {
-                rules.append(SearchRule(
-                    label: "Exact value",
-                    value: trimmed,
-                    requiresDigitBoundaries: false,
-                    replacementKind: replacementKind,
-                    replacementKey: replacementKey
-                ))
+                rules.append(SearchRule(label: "Exact value", value: trimmed, requiresDigitBoundaries: false))
             }
 
             if options.generateNameVariants, let variant = firstAndLastNameVariant(from: trimmed) {
                 let variantKey = variant.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
                 if seen.insert(variantKey).inserted {
-                    rules.append(SearchRule(
-                        label: "Name variant",
-                        value: variant,
-                        requiresDigitBoundaries: false,
-                        replacementKind: .name,
-                        replacementKey: replacementKey
-                    ))
+                    rules.append(SearchRule(label: "Name variant", value: variant, requiresDigitBoundaries: false))
                 }
             }
         }
@@ -869,57 +714,9 @@ enum PDFMasker {
             guard let label = baseLabel else { continue }
             let digits = match.matchedText.filter(\.isNumber)
             guard digits.count == 9, seen.insert("\(label)|\(digits)").inserted else { continue }
-            rules.append(SearchRule(
-                label: label,
-                value: digits,
-                requiresDigitBoundaries: true,
-                replacementKind: .identifier,
-                replacementKey: match.replacementKey ?? digits
-            ))
+            rules.append(SearchRule(label: label, value: digits, requiresDigitBoundaries: true))
         }
         return rules
-    }
-
-    private static func replacementKind(forExactTerm value: String) -> ReplacementKind {
-        if value.contains("@") { return .email }
-        let digits = value.filter(\.isNumber)
-        if digits.count == 9,
-           value.allSatisfy({ $0.isNumber || $0 == "-" || $0 == " " }) {
-            return .identifier
-        }
-        if (digits.count == 10 || digits.count == 11),
-           value.allSatisfy({ $0.isNumber || "()+-. ".contains($0) }) {
-            return .phone
-        }
-        let nameTokens = value.split(whereSeparator: \.isWhitespace)
-        let nameCharacters = CharacterSet.letters.union(CharacterSet(charactersIn: "'-.’&"))
-        if (2...8).contains(nameTokens.count),
-           nameTokens.allSatisfy({ token in
-               String(token).caseInsensitiveCompare("AND") == .orderedSame ||
-                   token.unicodeScalars.allSatisfy { nameCharacters.contains($0) }
-           }) {
-            return .name
-        }
-        if digits.count >= 3,
-           !value.contains(where: { $0.isWhitespace }),
-           value.allSatisfy({ $0.isLetter || $0.isNumber || "#-*._".contains($0) }) {
-            return .account
-        }
-        return .value
-    }
-
-    private static func normalizedReplacementKey(_ value: String, kind: ReplacementKind) -> String {
-        switch kind {
-        case .account, .identifier, .phone:
-            let digits = value.filter(\.isNumber)
-            return digits.isEmpty ? normalizedAccountLine(value) : digits
-        case .email:
-            return value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased()
-        case .name, .value:
-            return normalizedAccountLine(value)
-        }
     }
 
     private static func hasDigitBoundaries(in text: NSString, range: NSRange) -> Bool {
@@ -984,179 +781,10 @@ enum PDFMasker {
         }
     }
 
-    static func replacementLabels(for matches: [RedactionMatch]) -> [UUID: String] {
-        let ordered = matches.sorted { lhs, rhs in
-            let leftPath = lhs.fileURL.standardizedFileURL.path
-            let rightPath = rhs.fileURL.standardizedFileURL.path
-            if leftPath != rightPath { return leftPath < rightPath }
-            if lhs.pageIndex != rhs.pageIndex { return lhs.pageIndex < rhs.pageIndex }
-            let leftRect = lhs.rects.first?.standardized ?? .zero
-            let rightRect = rhs.rects.first?.standardized ?? .zero
-            if abs(leftRect.maxY - rightRect.maxY) > 0.5 { return leftRect.maxY > rightRect.maxY }
-            if abs(leftRect.minX - rightRect.minX) > 0.5 { return leftRect.minX < rightRect.minX }
-            return lhs.id.uuidString < rhs.id.uuidString
-        }
-
-        var counters: [ReplacementKind: Int] = [:]
-        var labelByGroup: [String: String] = [:]
-        var result: [UUID: String] = [:]
-
-        for match in ordered {
-            let kind = match.replacementKind ?? fallbackReplacementKind(for: match)
-            let key = match.replacementKey ?? normalizedReplacementKey(match.matchedText, kind: kind)
-            guard !key.isEmpty else { continue }
-            let group = kind.rawValue + "|" + key
-            let label: String
-            if let existing = labelByGroup[group] {
-                label = existing
-            } else {
-                let number = counters[kind, default: 0] + 1
-                counters[kind] = number
-                label = "<\(kind.rawValue) \(number)>"
-                labelByGroup[group] = label
-            }
-            result[match.id] = label
-        }
-        return result
-    }
-
-    static func replacementLabelPlacements(
-        for matches: [RedactionMatch],
-        labelsByMatchID: [UUID: String],
-        on page: PDFPage,
-        fontFamily: String = "Helvetica",
-        fontSize: CGFloat = 6,
-        widthScale: CGFloat = 1
-    ) -> [ReplacementLabelPlacement] {
-        let overlays = matches.compactMap { match -> ReplacementOverlay? in
-            guard let label = labelsByMatchID[match.id] else { return nil }
-            return ReplacementOverlay(matchID: match.id, rects: match.rects, label: label)
-        }
-        return replacementLabelPlacements(
-            for: overlays,
-            on: page,
-            fontFamily: fontFamily,
-            fontSize: fontSize,
-            widthScale: widthScale
-        )
-    }
-
-    static func replacementLabelForDisplay(
-        _ label: String,
-        in rect: CGRect,
-        fontFamily: String = "Helvetica",
-        fontSize: CGFloat = 6
-    ) -> String {
-        let availableWidth = max(rect.width - 3, 1)
-        let minimumReadableFont = replacementNSFont(family: fontFamily, size: min(max(fontSize, 3), 14))
-        let fullWidth = (label as NSString).size(withAttributes: [.font: minimumReadableFont]).width
-        guard fullWidth > availableWidth else { return label }
-
-        let pattern = #"^<([A-Za-z]+)\s+(\d+)>$"#
-        guard let expression = try? NSRegularExpression(pattern: pattern),
-              let match = expression.firstMatch(
-                in: label,
-                range: NSRange(label.startIndex..., in: label)
-              ),
-              let kindRange = Range(match.range(at: 1), in: label),
-              let numberRange = Range(match.range(at: 2), in: label),
-              let initial = label[kindRange].first else { return label }
-        return "<\(initial)\(label[numberRange])>"
-    }
-
-    private static func replacementLabelPlacements(
-        for overlays: [ReplacementOverlay],
-        on page: PDFPage,
-        fontFamily: String,
-        fontSize: CGFloat,
-        widthScale: CGFloat
-    ) -> [ReplacementLabelPlacement] {
-        let pageRect = displayBounds(for: page)
-        let safeWidthScale = min(max(widthScale, 1), 2)
-        let candidates = overlays.compactMap { overlay -> ReplacementPlacementCandidate? in
-            guard let widestRect = safeRedactionRects(overlay.rects, on: page).max(by: {
-                if abs($0.width - $1.width) > 0.5 { return $0.width < $1.width }
-                return $0.width * $0.height < $1.width * $1.height
-            }) else { return nil }
-            let labelFont = replacementNSFont(family: fontFamily, size: fontSize)
-            let naturalLabelWidth = (overlay.label as NSString).size(
-                withAttributes: [.font: labelFont]
-            ).width + 7
-            let maximumLabelWidth = widestRect.width * safeWidthScale
-            let labelWidth = min(max(naturalLabelWidth, 12), maximumLabelWidth)
-            let labelHeight = min(widestRect.height, max(fontSize * 1.55, 5))
-            let compactRect = CGRect(
-                x: widestRect.midX - labelWidth / 2,
-                y: widestRect.midY - labelHeight / 2,
-                width: labelWidth,
-                height: labelHeight
-            ).intersection(pageRect).standardized
-            return ReplacementPlacementCandidate(
-                placement: ReplacementLabelPlacement(
-                    matchID: overlay.matchID,
-                    rect: compactRect,
-                    label: replacementLabelForDisplay(
-                        overlay.label,
-                        in: compactRect,
-                        fontFamily: fontFamily,
-                        fontSize: fontSize
-                    )
-                ),
-                sourceRect: widestRect
-            )
-        }.sorted {
-            let leftArea = $0.sourceRect.width * $0.sourceRect.height
-            let rightArea = $1.sourceRect.width * $1.sourceRect.height
-            if abs(leftArea - rightArea) > 0.5 { return leftArea > rightArea }
-            if abs($0.sourceRect.maxY - $1.sourceRect.maxY) > 0.5 {
-                return $0.sourceRect.maxY > $1.sourceRect.maxY
-            }
-            return $0.sourceRect.minX < $1.sourceRect.minX
-        }
-
-        var accepted: [ReplacementPlacementCandidate] = []
-        for candidate in candidates {
-            let overlapsExisting = accepted.contains { existing in
-                let intersection = candidate.sourceRect.intersection(existing.sourceRect)
-                guard !intersection.isNull else { return false }
-                let intersectionArea = intersection.width * intersection.height
-                let smallerArea = min(
-                    candidate.sourceRect.width * candidate.sourceRect.height,
-                    existing.sourceRect.width * existing.sourceRect.height
-                )
-                return smallerArea > 0 && intersectionArea / smallerArea > 0.35
-            }
-            if !overlapsExisting { accepted.append(candidate) }
-        }
-        return accepted.map(\.placement).sorted {
-            if abs($0.rect.maxY - $1.rect.maxY) > 0.5 { return $0.rect.maxY > $1.rect.maxY }
-            return $0.rect.minX < $1.rect.minX
-        }
-    }
-
-    static func replacementNSFont(family: String, size: CGFloat) -> NSFont {
-        let safeSize = min(max(size, 2.5), 18)
-        if family == "System" { return .systemFont(ofSize: safeSize) }
-        return NSFont(name: family, size: safeSize) ?? .systemFont(ofSize: safeSize)
-    }
-
-    private static func fallbackReplacementKind(for match: RedactionMatch) -> ReplacementKind {
-        if match.category.hasPrefix("Account suffix") { return .account }
-        if match.category.hasPrefix("SSN") || match.category.hasPrefix("EIN") { return .identifier }
-        if match.category.hasPrefix("Email") { return .email }
-        if match.category.hasPrefix("Phone") { return .phone }
-        if match.category.hasPrefix("Name variant") { return .name }
-        return replacementKind(forExactTerm: match.matchedText)
-    }
-
     private static func renderPage(
         _ page: PDFPage,
         dpi: CGFloat,
-        redactionRects: [CGRect],
-        replacementOverlays: [ReplacementOverlay] = [],
-        replacementLabelFontFamily: String = "Helvetica",
-        replacementLabelFontSize: CGFloat = 6,
-        replacementLabelWidthScale: CGFloat = 1
+        redactionRects: [CGRect]
     ) -> CGImage? {
         let scale = max(dpi / 72.0, 1.0)
         let pageBounds = page.bounds(for: .mediaBox)
@@ -1207,109 +835,26 @@ enum PDFMasker {
         bitmap.restoreGState()
 
         if !redactionRects.isEmpty {
-            bitmap.setFillColor(replacementOverlays.isEmpty ? NSColor.black.cgColor : NSColor.white.cgColor)
+            bitmap.setFillColor(NSColor.black.cgColor)
             for rect in safeRedactionRects(redactionRects, on: page) {
                 bitmap.fill(rect.insetBy(dx: -0.75, dy: -0.75))
-            }
-            if !replacementOverlays.isEmpty {
-                for placement in replacementLabelPlacements(
-                    for: replacementOverlays,
-                    on: page,
-                    fontFamily: replacementLabelFontFamily,
-                    fontSize: replacementLabelFontSize,
-                    widthScale: replacementLabelWidthScale
-                ) {
-                    drawReplacementLabel(
-                        placement.label,
-                        in: placement.rect,
-                        fontFamily: replacementLabelFontFamily,
-                        preferredFontSize: replacementLabelFontSize,
-                        context: bitmap
-                    )
-                }
             }
         }
         return bitmap.makeImage()
     }
 
-    private static func drawReplacementLabel(
-        _ label: String,
-        in rect: CGRect,
-        fontFamily: String,
-        preferredFontSize: CGFloat,
-        context: CGContext
-    ) {
-        let available = rect.insetBy(dx: 0.8, dy: 0.4)
-        guard available.width > 4, available.height > 3 else { return }
-        let badgeRect = rect.insetBy(dx: 0.15, dy: 0.15)
-        let badgePath = CGPath(
-            roundedRect: badgeRect,
-            cornerWidth: min(max(badgeRect.height * 0.22, 1), 3),
-            cornerHeight: min(max(badgeRect.height * 0.22, 1), 3),
-            transform: nil
-        )
-        context.saveGState()
-        context.addPath(badgePath)
-        context.setFillColor(NSColor(calibratedWhite: 0.985, alpha: 1).cgColor)
-        context.fillPath()
-        context.restoreGState()
-        var fontSize = min(max(preferredFontSize, 2.5), max(available.height * 0.72, 2.5))
-        var nsFont = replacementNSFont(family: fontFamily, size: fontSize)
-        var font = CTFontCreateWithName(nsFont.fontName as CFString, fontSize, nil)
-        var attributes: [CFString: Any] = [
-            kCTFontAttributeName: font,
-            kCTForegroundColorAttributeName: NSColor.black.cgColor
-        ]
-        var line = CTLineCreateWithAttributedString(CFAttributedStringCreate(nil, label as CFString, attributes as CFDictionary))
-        var width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
-        if width > available.width {
-            fontSize = max(2.5, fontSize * available.width / max(width, 1))
-            nsFont = replacementNSFont(family: fontFamily, size: fontSize)
-            font = CTFontCreateWithName(nsFont.fontName as CFString, fontSize, nil)
-            attributes[kCTFontAttributeName] = font
-            line = CTLineCreateWithAttributedString(CFAttributedStringCreate(nil, label as CFString, attributes as CFDictionary))
-            width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
-        }
-        var ascent: CGFloat = 0
-        var descent: CGFloat = 0
-        _ = CTLineGetTypographicBounds(line, &ascent, &descent, nil)
-        let x = available.minX + max((available.width - width) / 2, 0)
-        let y = available.midY - (ascent - descent) / 2
-        context.saveGState()
-        context.textMatrix = .identity
-        context.textPosition = CGPoint(x: x, y: y)
-        CTLineDraw(line, context)
-        context.restoreGState()
-    }
-
     static func validateSanitizedOutput(
         _ url: URL,
         sourceDocument: PDFDocument,
-        matches: [RedactionMatch],
-        replaceWithLabels: Bool = false,
-        replacementLabelFontFamily: String = "Helvetica",
-        replacementLabelFontSize: CGFloat = 6,
-        replacementLabelWidthScale: CGFloat = 1
+        matches: [RedactionMatch]
     ) -> Bool {
-        sanitizedOutputValidationFailure(
-            url,
-            sourceDocument: sourceDocument,
-            matches: matches,
-            labelsByMatchID: replaceWithLabels ? replacementLabels(for: matches) : [:],
-            replacementLabelFontFamily: replacementLabelFontFamily,
-            replacementLabelFontSize: replacementLabelFontSize,
-            replacementLabelWidthScale: replacementLabelWidthScale
-        ) == nil
+        sanitizedOutputValidationFailure(url, sourceDocument: sourceDocument, matches: matches) == nil
     }
 
     static func sanitizedOutputValidationFailure(
         _ url: URL,
         sourceDocument: PDFDocument,
-        matches: [RedactionMatch],
-        labelsByMatchID: [UUID: String] = [:],
-        replacementLabelFontFamily: String = "Helvetica",
-        replacementLabelFontSize: CGFloat = 6,
-        replacementLabelWidthScale: CGFloat = 1
+        matches: [RedactionMatch]
     ) -> String? {
         guard let output = PDFDocument(url: url) else { return "the output could not be reopened" }
         guard output.pageCount == sourceDocument.pageCount else { return "the page count changed" }
@@ -1327,21 +872,7 @@ enum PDFMasker {
             let redactionRects = matches
                 .filter { $0.pageIndex == index && $0.isSelected }
                 .flatMap(\.rects)
-            let replacementOverlays = matches
-                .filter { $0.pageIndex == index && $0.isSelected }
-                .compactMap { match -> ReplacementOverlay? in
-                    guard let label = labelsByMatchID[match.id] else { return nil }
-                    return ReplacementOverlay(matchID: match.id, rects: match.rects, label: label)
-                }
-            guard let expectedImage = renderPage(
-                    sourcePage,
-                    dpi: 72,
-                    redactionRects: redactionRects,
-                    replacementOverlays: replacementOverlays,
-                    replacementLabelFontFamily: replacementLabelFontFamily,
-                    replacementLabelFontSize: replacementLabelFontSize,
-                    replacementLabelWidthScale: replacementLabelWidthScale
-                  ),
+            guard let expectedImage = renderPage(sourcePage, dpi: 72, redactionRects: redactionRects),
                   let outputImage = renderPage(outputPage, dpi: 72, redactionRects: []),
                   imagesAreVisuallyEquivalent(expectedImage, outputImage) else {
                 return "page \(index + 1) does not visually match the source"
