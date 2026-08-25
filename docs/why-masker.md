@@ -16,7 +16,7 @@ I enter the PII I already know about, run the scan, and review the proposed mask
 
 *Reviewing a generated Joe Farmer return. No real financial document is used in these screenshots.*
 
-The matching is case-insensitive and respects word boundaries. That sounds minor, but it prevents a short name from blanking the middle of an unrelated word. When two saved values overlap, the longer one wins.
+Matches are case-insensitive and stop at word boundaries. Longer overlapping values take precedence.
 
 ## Looking for what I missed
 
