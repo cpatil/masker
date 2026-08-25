@@ -15,6 +15,7 @@ Read the short development story: [I vibe-coded a PDF redactor because I needed 
 ## Features
 
 - Exact-value matching across one or more PDFs.
+- Longest-match preference for overlapping values, while retaining separate standalone occurrences.
 - SSN/ITIN, EIN, email, and US phone detection.
 - Compact nine-digit variants when a formatted SSN/ITIN or EIN is found.
 - Opt-in first-and-last name variants: `JOE AND MARY FARMER` can also find `Joe Farmer`.

@@ -45,7 +45,14 @@ struct MaskerSelfTest {
 
         let matches = PDFMasker.scan(
             files: [source],
-            exactTerms: ["Example Person", fullFarmerName, "444-55-6666", "555-66-7777"],
+            exactTerms: [
+                "Jordan",
+                "Alex & Jordan",
+                "Example Person",
+                fullFarmerName,
+                "444-55-6666",
+                "555-66-7777"
+            ],
             options: PatternOptions(detectSSN: true, detectEIN: true, detectEmail: true, detectPhone: true, generateNameVariants: true, detectAccountSuffixes: true),
             progress: { _ in }
         )
@@ -67,6 +74,17 @@ struct MaskerSelfTest {
         try require(!scannedSSNs.isEmpty, "Failed to detect the image-only SSN using OCR")
         try require(!rotatedSSNs.isEmpty, "Failed to detect the rotated-page SSN")
         try require(matches.contains(where: { $0.matchedText.caseInsensitiveCompare("Example Person") == .orderedSame }), "Failed to detect exact name")
+        let standaloneJordanMatches = matches.filter {
+            $0.matchedText.caseInsensitiveCompare("Jordan") == .orderedSame
+        }
+        try require(
+            standaloneJordanMatches.count == 1,
+            "Longest-match selection should suppress the embedded Jordan match but keep the standalone occurrence"
+        )
+        try require(
+            matches.contains(where: { $0.matchedText.caseInsensitiveCompare("Alex & Jordan") == .orderedSame }),
+            "Longest-match selection dropped the complete Alex & Jordan value"
+        )
         let joeFarmerMatches = matches.filter {
             $0.matchedText.uppercased() == joeFarmerVariant && $0.category == "Name variant"
         }
@@ -254,7 +272,7 @@ struct MaskerSelfTest {
 
         let residual = PDFMasker.scan(
             files: created,
-            exactTerms: ["Example Person", fullFarmerName, joeFarmerVariant, "123-45-6789", "123456789", "444-55-6666", "555-66-7777", "98-7654321", "987654321", "alpha@example.com", "(415) 555-0198"] + expectedSuffixes,
+            exactTerms: ["Alex & Jordan", "Jordan", "Example Person", fullFarmerName, joeFarmerVariant, "123-45-6789", "123456789", "444-55-6666", "555-66-7777", "98-7654321", "987654321", "alpha@example.com", "(415) 555-0198"] + expectedSuffixes,
             options: PatternOptions(detectSSN: true, detectEIN: true, detectEmail: true, detectPhone: true, generateNameVariants: true, detectAccountSuffixes: true),
             progress: { _ in }
         )
@@ -324,7 +342,7 @@ struct MaskerSelfTest {
         pdf.beginPDFPage(nil)
         pdf.setFillColor(NSColor.white.cgColor)
         pdf.fill(mediaBox)
-        drawText("Taxpayer: Example Person\nOwners: JOE AND MARY FARMER\nShort form: Joe Farmer\nSSN: 123-45-6789\nSSN copy: 123456789\nEIN: 98-7654321\nEIN copy: 987654321\nEmail: alpha@example.com\nPhone: (415) 555-0198", in: pdf, at: CGPoint(x: 72, y: 700))
+        drawText("Taxpayer: Example Person\nOwners: JOE AND MARY FARMER\nShort form: Joe Farmer\nHousehold: Alex & Jordan\nSeparate contact: Jordan\nSSN: 123-45-6789\nSSN copy: 123456789\nEIN: 98-7654321\nEIN copy: 987654321\nEmail: alpha@example.com\nPhone: (415) 555-0198", in: pdf, at: CGPoint(x: 72, y: 700))
         pdf.endPDFPage()
 
         pdf.beginPDFPage(nil)

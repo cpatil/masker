@@ -770,25 +770,57 @@ enum PDFMasker {
     }
 
     private static func deduplicated(_ matches: [RedactionMatch]) -> [RedactionMatch] {
-        var result: [RedactionMatch] = []
-        var indexByKey: [String: Int] = [:]
-        for match in matches {
-            let rectKey = match.rects.map {
-                "\(Int($0.minX.rounded())):\(Int($0.minY.rounded())):\(Int($0.width.rounded())):\(Int($0.height.rounded()))"
-            }.joined(separator: ";")
-            let key = "\(match.fileURL.standardizedFileURL.path)|\(match.pageIndex)|\(rectKey)"
-            if let existingIndex = indexByKey[key] {
-                let existing = result[existingIndex]
-                if match.category.hasPrefix("Account suffix") &&
-                    !existing.category.hasPrefix("Account suffix") {
-                    result[existingIndex] = match
-                }
-            } else {
-                indexByKey[key] = result.count
-                result.append(match)
+        let ranked = matches.indices.sorted { leftIndex, rightIndex in
+            let left = matches[leftIndex]
+            let right = matches[rightIndex]
+            let leftLength = normalizedMatchLength(left.matchedText)
+            let rightLength = normalizedMatchLength(right.matchedText)
+            if leftLength != rightLength { return leftLength > rightLength }
+
+            let leftArea = left.rects.reduce(CGFloat.zero) { $0 + $1.width * $1.height }
+            let rightArea = right.rects.reduce(CGFloat.zero) { $0 + $1.width * $1.height }
+            if abs(leftArea - rightArea) > 0.5 { return leftArea > rightArea }
+
+            let leftIsAccount = left.category.hasPrefix("Account suffix")
+            let rightIsAccount = right.category.hasPrefix("Account suffix")
+            if leftIsAccount != rightIsAccount { return leftIsAccount }
+            return leftIndex < rightIndex
+        }
+
+        var keptIndices: [Int] = []
+        for candidateIndex in ranked {
+            let candidate = matches[candidateIndex]
+            let isCoveredByLongerMatch = keptIndices.contains { keptIndex in
+                let preferred = matches[keptIndex]
+                guard preferred.fileURL.standardizedFileURL == candidate.fileURL.standardizedFileURL,
+                      preferred.pageIndex == candidate.pageIndex else { return false }
+                return spatiallyCovers(preferred.rects, candidate.rects)
+            }
+            if !isCoveredByLongerMatch { keptIndices.append(candidateIndex) }
+        }
+
+        let kept = Set(keptIndices)
+        return matches.indices.compactMap { kept.contains($0) ? matches[$0] : nil }
+    }
+
+    private static func normalizedMatchLength(_ value: String) -> Int {
+        value.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) }.count
+    }
+
+    private static func spatiallyCovers(_ preferredRects: [CGRect], _ candidateRects: [CGRect]) -> Bool {
+        guard !preferredRects.isEmpty, !candidateRects.isEmpty else { return false }
+        return candidateRects.allSatisfy { candidateRect in
+            let candidate = candidateRect.standardized
+            guard candidate.width > 0, candidate.height > 0 else { return false }
+            let center = CGPoint(x: candidate.midX, y: candidate.midY)
+            return preferredRects.contains { preferredRect in
+                let preferred = preferredRect.standardized
+                if preferred.insetBy(dx: -1, dy: -1).contains(center) { return true }
+                let intersection = preferred.intersection(candidate)
+                guard !intersection.isNull else { return false }
+                return intersection.width * intersection.height >= candidate.width * candidate.height * 0.6
             }
         }
-        return result
     }
 
     private static func displayBounds(for page: PDFPage) -> CGRect {

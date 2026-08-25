@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.1 - 2026-08-24
+
+- Prefers the longest value when detected matches overlap, independent of the order values were entered.
+- Keeps shorter matches when they occur separately elsewhere on the page.
+- Adds a generated regression case where `Jordan` is entered before `Alex & Jordan`.
+
 ## 1.5.0 - 2026-08-24
 
 - Adds a compact optional **Replace with** field beside each detected value; an empty field keeps the standard black mask.
