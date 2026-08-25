@@ -110,6 +110,29 @@ struct MaskerSelfTest {
             .compactMap { replacementLabels[$0.id] })
         try require(crossInstitution2759Labels.count == 2, "Different institutions sharing a suffix reused one label")
         try require(
+            PDFMasker.replacementLabelForDisplay("<Value 12>", in: CGRect(x: 0, y: 0, width: 22, height: 9)) == "<V12>",
+            "Narrow replacement labels were not compacted"
+        )
+        if let sourceDocument = PDFDocument(url: source),
+           let firstPage = sourceDocument.page(at: 0) {
+            let placements = PDFMasker.replacementLabelPlacements(
+                for: matches.filter { $0.pageIndex == 0 },
+                labelsByMatchID: replacementLabels,
+                on: firstPage
+            )
+            for leftIndex in placements.indices {
+                for rightIndex in placements.indices where rightIndex > leftIndex {
+                    let left = placements[leftIndex].rect
+                    let right = placements[rightIndex].rect
+                    let intersection = left.intersection(right)
+                    guard !intersection.isNull else { continue }
+                    let overlap = intersection.width * intersection.height
+                    let smaller = min(left.width * left.height, right.width * right.height)
+                    try require(smaller == 0 || overlap / smaller <= 0.35, "Replacement labels still overlap")
+                }
+            }
+        }
+        try require(
             !accountSuffixes.contains("1040") && !accountSuffixes.contains("2025") &&
                 !accountSuffixes.contains("8879") && !accountSuffixes.contains("777"),
             "Form number or tax year was mistaken for an account suffix"
@@ -250,6 +273,9 @@ struct MaskerSelfTest {
             matches: matches,
             outputFolder: labeledOutputs,
             replaceWithLabels: true,
+            replacementLabelFontFamily: "Menlo",
+            replacementLabelFontSize: 5,
+            replacementLabelWidthScale: 1.2,
             progress: { _ in }
         )
         try require(labeled.count == 1, "Expected one labeled output")

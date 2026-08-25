@@ -80,7 +80,14 @@ enum MaskerError: LocalizedError {
 
 enum PDFMasker {
     private struct ReplacementOverlay {
+        let matchID: UUID
         let rects: [CGRect]
+        let label: String
+    }
+
+    struct ReplacementLabelPlacement {
+        let matchID: UUID
+        let rect: CGRect
         let label: String
     }
 
@@ -201,6 +208,9 @@ enum PDFMasker {
         matches: [RedactionMatch],
         outputFolder: URL,
         replaceWithLabels: Bool = false,
+        replacementLabelFontFamily: String = "Helvetica",
+        replacementLabelFontSize: CGFloat = 6,
+        replacementLabelWidthScale: CGFloat = 1,
         dpi: CGFloat = 300,
         progress: @escaping (String) -> Void
     ) throws -> [URL] {
@@ -250,14 +260,17 @@ enum PDFMasker {
                             .filter { $0.pageIndex == pageIndex }
                             .compactMap { match -> ReplacementOverlay? in
                                 guard let label = labelsByMatchID[match.id] else { return nil }
-                                return ReplacementOverlay(rects: match.rects, label: label)
+                                return ReplacementOverlay(matchID: match.id, rects: match.rects, label: label)
                             }
 
                         guard let image = renderPage(
                             page,
                             dpi: dpi,
                             redactionRects: redactionRects,
-                            replacementOverlays: replacementOverlays
+                            replacementOverlays: replacementOverlays,
+                            replacementLabelFontFamily: replacementLabelFontFamily,
+                            replacementLabelFontSize: replacementLabelFontSize,
+                            replacementLabelWidthScale: replacementLabelWidthScale
                         ) else {
                             context.endPDFPage()
                             throw MaskerError.cannotRender(page: pageIndex, file: fileURL)
@@ -281,7 +294,10 @@ enum PDFMasker {
                 outputURL,
                 sourceDocument: document,
                 matches: fileMatches,
-                labelsByMatchID: labelsByMatchID
+                labelsByMatchID: labelsByMatchID,
+                replacementLabelFontFamily: replacementLabelFontFamily,
+                replacementLabelFontSize: replacementLabelFontSize,
+                replacementLabelWidthScale: replacementLabelWidthScale
             ) {
                 try? FileManager.default.removeItem(at: outputURL)
                 throw MaskerError.outputValidationFailed(outputURL, validationFailure)
@@ -297,6 +313,9 @@ enum PDFMasker {
         pageIndex: Int,
         matches: [RedactionMatch],
         replaceWithLabels: Bool = false,
+        replacementLabelFontFamily: String = "Helvetica",
+        replacementLabelFontSize: CGFloat = 6,
+        replacementLabelWidthScale: CGFloat = 1,
         dpi: CGFloat = 110
     ) -> NSImage? {
         guard let document = PDFDocument(url: fileURL), let page = document.page(at: pageIndex) else { return nil }
@@ -305,13 +324,16 @@ enum PDFMasker {
         let labelsByMatchID = replaceWithLabels ? replacementLabels(for: matches) : [:]
         let overlays = pageMatches.compactMap { match -> ReplacementOverlay? in
             guard let label = labelsByMatchID[match.id] else { return nil }
-            return ReplacementOverlay(rects: match.rects, label: label)
+            return ReplacementOverlay(matchID: match.id, rects: match.rects, label: label)
         }
         guard let cgImage = renderPage(
             page,
             dpi: dpi,
             redactionRects: rects,
-            replacementOverlays: overlays
+            replacementOverlays: overlays,
+            replacementLabelFontFamily: replacementLabelFontFamily,
+            replacementLabelFontSize: replacementLabelFontSize,
+            replacementLabelWidthScale: replacementLabelWidthScale
         ) else { return nil }
         return NSImage(cgImage: cgImage, size: displayBounds(for: page).size)
     }
@@ -993,6 +1015,114 @@ enum PDFMasker {
         return result
     }
 
+    static func replacementLabelPlacements(
+        for matches: [RedactionMatch],
+        labelsByMatchID: [UUID: String],
+        on page: PDFPage,
+        fontFamily: String = "Helvetica",
+        fontSize: CGFloat = 6,
+        widthScale: CGFloat = 1
+    ) -> [ReplacementLabelPlacement] {
+        let overlays = matches.compactMap { match -> ReplacementOverlay? in
+            guard let label = labelsByMatchID[match.id] else { return nil }
+            return ReplacementOverlay(matchID: match.id, rects: match.rects, label: label)
+        }
+        return replacementLabelPlacements(
+            for: overlays,
+            on: page,
+            fontFamily: fontFamily,
+            fontSize: fontSize,
+            widthScale: widthScale
+        )
+    }
+
+    static func replacementLabelForDisplay(
+        _ label: String,
+        in rect: CGRect,
+        fontFamily: String = "Helvetica",
+        fontSize: CGFloat = 6
+    ) -> String {
+        let availableWidth = max(rect.width - 3, 1)
+        let minimumReadableFont = replacementNSFont(family: fontFamily, size: min(max(fontSize, 3), 14))
+        let fullWidth = (label as NSString).size(withAttributes: [.font: minimumReadableFont]).width
+        guard fullWidth > availableWidth else { return label }
+
+        let pattern = #"^<([A-Za-z]+)\s+(\d+)>$"#
+        guard let expression = try? NSRegularExpression(pattern: pattern),
+              let match = expression.firstMatch(
+                in: label,
+                range: NSRange(label.startIndex..., in: label)
+              ),
+              let kindRange = Range(match.range(at: 1), in: label),
+              let numberRange = Range(match.range(at: 2), in: label),
+              let initial = label[kindRange].first else { return label }
+        return "<\(initial)\(label[numberRange])>"
+    }
+
+    private static func replacementLabelPlacements(
+        for overlays: [ReplacementOverlay],
+        on page: PDFPage,
+        fontFamily: String,
+        fontSize: CGFloat,
+        widthScale: CGFloat
+    ) -> [ReplacementLabelPlacement] {
+        let pageRect = displayBounds(for: page)
+        let safeWidthScale = min(max(widthScale, 1), 2)
+        let candidates = overlays.compactMap { overlay -> ReplacementLabelPlacement? in
+            guard let widestRect = safeRedactionRects(overlay.rects, on: page).max(by: {
+                if abs($0.width - $1.width) > 0.5 { return $0.width < $1.width }
+                return $0.width * $0.height < $1.width * $1.height
+            }) else { return nil }
+            let expandedRect = CGRect(
+                x: widestRect.midX - widestRect.width * safeWidthScale / 2,
+                y: widestRect.minY,
+                width: widestRect.width * safeWidthScale,
+                height: widestRect.height
+            ).intersection(pageRect).standardized
+            return ReplacementLabelPlacement(
+                matchID: overlay.matchID,
+                rect: expandedRect,
+                label: replacementLabelForDisplay(
+                    overlay.label,
+                    in: expandedRect,
+                    fontFamily: fontFamily,
+                    fontSize: fontSize
+                )
+            )
+        }.sorted {
+            let leftArea = $0.rect.width * $0.rect.height
+            let rightArea = $1.rect.width * $1.rect.height
+            if abs(leftArea - rightArea) > 0.5 { return leftArea > rightArea }
+            if abs($0.rect.maxY - $1.rect.maxY) > 0.5 { return $0.rect.maxY > $1.rect.maxY }
+            return $0.rect.minX < $1.rect.minX
+        }
+
+        var accepted: [ReplacementLabelPlacement] = []
+        for candidate in candidates {
+            let overlapsExisting = accepted.contains { existing in
+                let intersection = candidate.rect.intersection(existing.rect)
+                guard !intersection.isNull else { return false }
+                let intersectionArea = intersection.width * intersection.height
+                let smallerArea = min(
+                    candidate.rect.width * candidate.rect.height,
+                    existing.rect.width * existing.rect.height
+                )
+                return smallerArea > 0 && intersectionArea / smallerArea > 0.35
+            }
+            if !overlapsExisting { accepted.append(candidate) }
+        }
+        return accepted.sorted {
+            if abs($0.rect.maxY - $1.rect.maxY) > 0.5 { return $0.rect.maxY > $1.rect.maxY }
+            return $0.rect.minX < $1.rect.minX
+        }
+    }
+
+    static func replacementNSFont(family: String, size: CGFloat) -> NSFont {
+        let safeSize = min(max(size, 2.5), 18)
+        if family == "System" { return .systemFont(ofSize: safeSize) }
+        return NSFont(name: family, size: safeSize) ?? .systemFont(ofSize: safeSize)
+    }
+
     private static func fallbackReplacementKind(for match: RedactionMatch) -> ReplacementKind {
         if match.category.hasPrefix("Account suffix") { return .account }
         if match.category.hasPrefix("SSN") || match.category.hasPrefix("EIN") { return .identifier }
@@ -1006,7 +1136,10 @@ enum PDFMasker {
         _ page: PDFPage,
         dpi: CGFloat,
         redactionRects: [CGRect],
-        replacementOverlays: [ReplacementOverlay] = []
+        replacementOverlays: [ReplacementOverlay] = [],
+        replacementLabelFontFamily: String = "Helvetica",
+        replacementLabelFontSize: CGFloat = 6,
+        replacementLabelWidthScale: CGFloat = 1
     ) -> CGImage? {
         let scale = max(dpi / 72.0, 1.0)
         let pageBounds = page.bounds(for: .mediaBox)
@@ -1062,20 +1195,54 @@ enum PDFMasker {
                 bitmap.fill(rect.insetBy(dx: -0.75, dy: -0.75))
             }
             if !replacementOverlays.isEmpty {
-                for overlay in replacementOverlays {
-                    guard let rect = safeRedactionRects(overlay.rects, on: page).first else { continue }
-                    drawReplacementLabel(overlay.label, in: rect, context: bitmap)
+                for placement in replacementLabelPlacements(
+                    for: replacementOverlays,
+                    on: page,
+                    fontFamily: replacementLabelFontFamily,
+                    fontSize: replacementLabelFontSize,
+                    widthScale: replacementLabelWidthScale
+                ) {
+                    drawReplacementLabel(
+                        placement.label,
+                        in: placement.rect,
+                        fontFamily: replacementLabelFontFamily,
+                        preferredFontSize: replacementLabelFontSize,
+                        context: bitmap
+                    )
                 }
             }
         }
         return bitmap.makeImage()
     }
 
-    private static func drawReplacementLabel(_ label: String, in rect: CGRect, context: CGContext) {
+    private static func drawReplacementLabel(
+        _ label: String,
+        in rect: CGRect,
+        fontFamily: String,
+        preferredFontSize: CGFloat,
+        context: CGContext
+    ) {
         let available = rect.insetBy(dx: 0.8, dy: 0.4)
         guard available.width > 4, available.height > 3 else { return }
-        var fontSize = min(max(available.height * 0.64, 5), 13)
-        var font = CTFontCreateWithName("Helvetica" as CFString, fontSize, nil)
+        let badgeRect = rect.insetBy(dx: 0.15, dy: 0.15)
+        let badgePath = CGPath(
+            roundedRect: badgeRect,
+            cornerWidth: min(max(badgeRect.height * 0.22, 1), 3),
+            cornerHeight: min(max(badgeRect.height * 0.22, 1), 3),
+            transform: nil
+        )
+        context.saveGState()
+        context.addPath(badgePath)
+        context.setFillColor(NSColor(calibratedWhite: 0.94, alpha: 1).cgColor)
+        context.fillPath()
+        context.addPath(badgePath)
+        context.setStrokeColor(NSColor(calibratedWhite: 0.68, alpha: 1).cgColor)
+        context.setLineWidth(0.55)
+        context.strokePath()
+        context.restoreGState()
+        var fontSize = min(max(preferredFontSize, 2.5), max(available.height * 0.72, 2.5))
+        var nsFont = replacementNSFont(family: fontFamily, size: fontSize)
+        var font = CTFontCreateWithName(nsFont.fontName as CFString, fontSize, nil)
         var attributes: [CFString: Any] = [
             kCTFontAttributeName: font,
             kCTForegroundColorAttributeName: NSColor.black.cgColor
@@ -1083,8 +1250,9 @@ enum PDFMasker {
         var line = CTLineCreateWithAttributedString(CFAttributedStringCreate(nil, label as CFString, attributes as CFDictionary))
         var width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
         if width > available.width {
-            fontSize = max(4.5, fontSize * available.width / max(width, 1))
-            font = CTFontCreateWithName("Helvetica" as CFString, fontSize, nil)
+            fontSize = max(2.5, fontSize * available.width / max(width, 1))
+            nsFont = replacementNSFont(family: fontFamily, size: fontSize)
+            font = CTFontCreateWithName(nsFont.fontName as CFString, fontSize, nil)
             attributes[kCTFontAttributeName] = font
             line = CTLineCreateWithAttributedString(CFAttributedStringCreate(nil, label as CFString, attributes as CFDictionary))
             width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
@@ -1105,13 +1273,19 @@ enum PDFMasker {
         _ url: URL,
         sourceDocument: PDFDocument,
         matches: [RedactionMatch],
-        replaceWithLabels: Bool = false
+        replaceWithLabels: Bool = false,
+        replacementLabelFontFamily: String = "Helvetica",
+        replacementLabelFontSize: CGFloat = 6,
+        replacementLabelWidthScale: CGFloat = 1
     ) -> Bool {
         sanitizedOutputValidationFailure(
             url,
             sourceDocument: sourceDocument,
             matches: matches,
-            labelsByMatchID: replaceWithLabels ? replacementLabels(for: matches) : [:]
+            labelsByMatchID: replaceWithLabels ? replacementLabels(for: matches) : [:],
+            replacementLabelFontFamily: replacementLabelFontFamily,
+            replacementLabelFontSize: replacementLabelFontSize,
+            replacementLabelWidthScale: replacementLabelWidthScale
         ) == nil
     }
 
@@ -1119,7 +1293,10 @@ enum PDFMasker {
         _ url: URL,
         sourceDocument: PDFDocument,
         matches: [RedactionMatch],
-        labelsByMatchID: [UUID: String] = [:]
+        labelsByMatchID: [UUID: String] = [:],
+        replacementLabelFontFamily: String = "Helvetica",
+        replacementLabelFontSize: CGFloat = 6,
+        replacementLabelWidthScale: CGFloat = 1
     ) -> String? {
         guard let output = PDFDocument(url: url) else { return "the output could not be reopened" }
         guard output.pageCount == sourceDocument.pageCount else { return "the page count changed" }
@@ -1141,13 +1318,16 @@ enum PDFMasker {
                 .filter { $0.pageIndex == index && $0.isSelected }
                 .compactMap { match -> ReplacementOverlay? in
                     guard let label = labelsByMatchID[match.id] else { return nil }
-                    return ReplacementOverlay(rects: match.rects, label: label)
+                    return ReplacementOverlay(matchID: match.id, rects: match.rects, label: label)
                 }
             guard let expectedImage = renderPage(
                     sourcePage,
                     dpi: 72,
                     redactionRects: redactionRects,
-                    replacementOverlays: replacementOverlays
+                    replacementOverlays: replacementOverlays,
+                    replacementLabelFontFamily: replacementLabelFontFamily,
+                    replacementLabelFontSize: replacementLabelFontSize,
+                    replacementLabelWidthScale: replacementLabelWidthScale
                   ),
                   let outputImage = renderPage(outputPage, dpi: 72, redactionRects: []),
                   imagesAreVisuallyEquivalent(expectedImage, outputImage) else {

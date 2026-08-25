@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.4 - 2026-08-24
+
+- Fixes preview-only mask reveal by tracking pointer movement in the PDF view itself.
+- Temporarily removes preview mask annotations while hovered so the underlying page is reliably visible, then restores them when the pointer leaves.
+- Cleans up replacement placeholders by suppressing spatially overlapping labels, using the widest safe match rectangle, shortening labels in narrow areas, and drawing a subtle badge around each placeholder.
+- Adds persistent live controls for replacement-label font family, point size, and width; the same choices are used in preview and export.
+
 ## 1.4.3 - 2026-08-24
 
 - Makes the Recent PDFs import and export actions compact, bordered buttons with icons instead of plain text links.
