@@ -120,6 +120,14 @@ struct MaskerSelfTest {
                 labelsByMatchID: replacementLabels,
                 on: firstPage
             )
+            if let fullFarmerMatch,
+               let fullNamePlacement = placements.first(where: { $0.matchID == fullFarmerMatch.id }),
+               let sourceWidth = fullFarmerMatch.rects.first?.width {
+                try require(
+                    fullNamePlacement.rect.width < sourceWidth * 0.6,
+                    "A replacement label still stretches across a wide source field"
+                )
+            }
             for leftIndex in placements.indices {
                 for rightIndex in placements.indices where rightIndex > leftIndex {
                     let left = placements[leftIndex].rect

@@ -85,6 +85,11 @@ enum PDFMasker {
         let label: String
     }
 
+    private struct ReplacementPlacementCandidate {
+        let placement: ReplacementLabelPlacement
+        let sourceRect: CGRect
+    }
+
     struct ReplacementLabelPlacement {
         let matchID: UUID
         let rect: CGRect
@@ -1068,50 +1073,62 @@ enum PDFMasker {
     ) -> [ReplacementLabelPlacement] {
         let pageRect = displayBounds(for: page)
         let safeWidthScale = min(max(widthScale, 1), 2)
-        let candidates = overlays.compactMap { overlay -> ReplacementLabelPlacement? in
+        let candidates = overlays.compactMap { overlay -> ReplacementPlacementCandidate? in
             guard let widestRect = safeRedactionRects(overlay.rects, on: page).max(by: {
                 if abs($0.width - $1.width) > 0.5 { return $0.width < $1.width }
                 return $0.width * $0.height < $1.width * $1.height
             }) else { return nil }
-            let expandedRect = CGRect(
-                x: widestRect.midX - widestRect.width * safeWidthScale / 2,
-                y: widestRect.minY,
-                width: widestRect.width * safeWidthScale,
-                height: widestRect.height
+            let labelFont = replacementNSFont(family: fontFamily, size: fontSize)
+            let naturalLabelWidth = (overlay.label as NSString).size(
+                withAttributes: [.font: labelFont]
+            ).width + 7
+            let maximumLabelWidth = widestRect.width * safeWidthScale
+            let labelWidth = min(max(naturalLabelWidth, 12), maximumLabelWidth)
+            let labelHeight = min(widestRect.height, max(fontSize * 1.55, 5))
+            let compactRect = CGRect(
+                x: widestRect.midX - labelWidth / 2,
+                y: widestRect.midY - labelHeight / 2,
+                width: labelWidth,
+                height: labelHeight
             ).intersection(pageRect).standardized
-            return ReplacementLabelPlacement(
-                matchID: overlay.matchID,
-                rect: expandedRect,
-                label: replacementLabelForDisplay(
-                    overlay.label,
-                    in: expandedRect,
-                    fontFamily: fontFamily,
-                    fontSize: fontSize
-                )
+            return ReplacementPlacementCandidate(
+                placement: ReplacementLabelPlacement(
+                    matchID: overlay.matchID,
+                    rect: compactRect,
+                    label: replacementLabelForDisplay(
+                        overlay.label,
+                        in: compactRect,
+                        fontFamily: fontFamily,
+                        fontSize: fontSize
+                    )
+                ),
+                sourceRect: widestRect
             )
         }.sorted {
-            let leftArea = $0.rect.width * $0.rect.height
-            let rightArea = $1.rect.width * $1.rect.height
+            let leftArea = $0.sourceRect.width * $0.sourceRect.height
+            let rightArea = $1.sourceRect.width * $1.sourceRect.height
             if abs(leftArea - rightArea) > 0.5 { return leftArea > rightArea }
-            if abs($0.rect.maxY - $1.rect.maxY) > 0.5 { return $0.rect.maxY > $1.rect.maxY }
-            return $0.rect.minX < $1.rect.minX
+            if abs($0.sourceRect.maxY - $1.sourceRect.maxY) > 0.5 {
+                return $0.sourceRect.maxY > $1.sourceRect.maxY
+            }
+            return $0.sourceRect.minX < $1.sourceRect.minX
         }
 
-        var accepted: [ReplacementLabelPlacement] = []
+        var accepted: [ReplacementPlacementCandidate] = []
         for candidate in candidates {
             let overlapsExisting = accepted.contains { existing in
-                let intersection = candidate.rect.intersection(existing.rect)
+                let intersection = candidate.sourceRect.intersection(existing.sourceRect)
                 guard !intersection.isNull else { return false }
                 let intersectionArea = intersection.width * intersection.height
                 let smallerArea = min(
-                    candidate.rect.width * candidate.rect.height,
-                    existing.rect.width * existing.rect.height
+                    candidate.sourceRect.width * candidate.sourceRect.height,
+                    existing.sourceRect.width * existing.sourceRect.height
                 )
                 return smallerArea > 0 && intersectionArea / smallerArea > 0.35
             }
             if !overlapsExisting { accepted.append(candidate) }
         }
-        return accepted.sorted {
+        return accepted.map(\.placement).sorted {
             if abs($0.rect.maxY - $1.rect.maxY) > 0.5 { return $0.rect.maxY > $1.rect.maxY }
             return $0.rect.minX < $1.rect.minX
         }
@@ -1233,12 +1250,8 @@ enum PDFMasker {
         )
         context.saveGState()
         context.addPath(badgePath)
-        context.setFillColor(NSColor(calibratedWhite: 0.94, alpha: 1).cgColor)
+        context.setFillColor(NSColor(calibratedWhite: 0.985, alpha: 1).cgColor)
         context.fillPath()
-        context.addPath(badgePath)
-        context.setStrokeColor(NSColor(calibratedWhite: 0.68, alpha: 1).cgColor)
-        context.setLineWidth(0.55)
-        context.strokePath()
         context.restoreGState()
         var fontSize = min(max(preferredFontSize, 2.5), max(available.height * 0.72, 2.5))
         var nsFont = replacementNSFont(family: fontFamily, size: fontSize)

@@ -837,7 +837,7 @@ struct ContentView: View {
                                         .font(.caption.monospacedDigit())
                                         .frame(width: 38, alignment: .trailing)
                                 }
-                                Text("Width above 100% can cover nearby text; check the preview before exporting.")
+                                Text("Width helps a label fit when the original field is narrow; wide fields still use compact labels.")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
@@ -1642,14 +1642,14 @@ struct ContinuousPDFView: NSViewRepresentable {
                         family: replacementLabelFontFamily,
                         preferredSize: replacementLabelFontSize
                     )
-                    annotation.fontColor = .black
-                    annotation.color = NSColor(calibratedWhite: 0.68, alpha: 1)
-                    annotation.interiorColor = NSColor(calibratedWhite: 0.94, alpha: 1)
+                    annotation.fontColor = NSColor(calibratedWhite: 0.16, alpha: 1)
+                    annotation.color = .clear
+                    annotation.interiorColor = NSColor(calibratedWhite: 0.985, alpha: 1)
                     annotation.alignment = .center
                     annotation.shouldDisplay = true
                     annotation.shouldPrint = true
                     let border = PDFBorder()
-                    border.lineWidth = 0.55
+                    border.lineWidth = 0
                     annotation.border = border
                     page.addAnnotation(annotation)
                     maskAnnotations.append(annotation)

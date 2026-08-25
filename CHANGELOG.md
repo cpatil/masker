@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.5 - 2026-08-24
+
+- Replaces stretched gray replacement bars with compact, intrinsic-size labels on an almost-white background.
+- Keeps width adjustment useful for narrow source fields without stretching labels across already-wide fields.
+- Suppresses duplicate labels based on overlapping source regions, even when their compact label frames do not overlap.
+
 ## 1.4.4 - 2026-08-24
 
 - Fixes preview-only mask reveal by tracking pointer movement in the PDF view itself.
