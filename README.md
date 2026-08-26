@@ -4,13 +4,15 @@
 
 Masker finds repeated personal information, lets you review every proposed mask in a continuous PDF view, and creates sanitized copies without uploading the document or its contents.
 
-![Masker reviewing a generated test PDF](docs/masker.png)
+![Masker reviewing a generated Joe Farmer tax return](docs/joe-farmer-overview.png)
+
+*The screenshots use a generated Joe Farmer tax return, not a real financial document.*
 
 ## Why
 
 Preview's redaction tool is effective, but selecting every occurrence by hand is tedious. Masker automates the repetitive part while keeping the consequential decision - what gets removed - visible and reversible until export.
 
-Read the short development story: [I vibe-coded a PDF redactor because I needed one](docs/why-masker.md).
+Read the short development story: [Nothing Personal: I built a local PDF redactor](docs/why-masker.md).
 
 ## Features
 
@@ -31,6 +33,14 @@ Read the short development story: [I vibe-coded a PDF redactor because I needed 
 - Discovery Mode recursively walks PDFs under a folder while one shared mask set grows; navigation has no scan or review gate.
 - Batch Convert applies a mask-set JSON to every PDF under a folder and mirrors its subfolders under `Masked PDFs`.
 - An optional MCP companion lets Codex coordinate discovery and batch conversion using opaque IDs and counts without receiving document contents or identifying metadata.
+
+![Searching for a synthetic name that was not in the original mask set](docs/joe-farmer-search.png)
+
+*Incremental search finds a synthetic name that was not in the original mask set.*
+
+![Synthetic taxpayers and SSNs replaced with labels](docs/joe-farmer-labels.png)
+
+*Labels preserve useful relationships without retaining the original PII.*
 
 ## Try it
 
