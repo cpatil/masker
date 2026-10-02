@@ -57,6 +57,55 @@ private extension View {
     }
 }
 
+struct ManagedMaskEntry: Identifiable, Equatable {
+    let id: UUID
+    var value: String
+    var replaceWith: String
+    var fontName: String
+    var fontSize: Double
+    var widthPercent: Double
+    var justification: String
+
+    init(id: UUID = UUID(), entry: MaskValueEntry) {
+        self.id = id
+        value = entry.value
+        replaceWith = entry.replaceWith
+        fontName = entry.fontName ?? "Helvetica-Bold"
+        fontSize = entry.fontSize ?? 0
+        widthPercent = entry.widthPercent ?? 100
+        justification = entry.justification ?? ReplacementLabelAlignment.center.rawValue
+    }
+
+    init(id: UUID = UUID(), value: String = "", replaceWith: String = "") {
+        self.init(id: id, entry: MaskValueEntry(value: value, replaceWith: replaceWith))
+    }
+
+    var maskValueEntry: MaskValueEntry {
+        MaskValueEntry(
+            value: value.trimmingCharacters(in: .whitespacesAndNewlines),
+            replaceWith: replaceWith.trimmingCharacters(in: .whitespacesAndNewlines),
+            fontName: replaceWith.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || fontName == "Helvetica-Bold" ? nil : fontName,
+            fontSize: fontSize == 0 ? nil : fontSize,
+            widthPercent: widthPercent == 100 ? nil : widthPercent,
+            justification: justification == ReplacementLabelAlignment.center.rawValue ? nil : justification
+        )
+    }
+}
+
+enum MaskSetManagementError: LocalizedError {
+    case emptyValue
+    case duplicateValue(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .emptyValue:
+            return "Every mask needs a value. Finish or delete the empty row."
+        case .duplicateValue(let value):
+            return "“\(value)” appears more than once. Mask values are case-insensitive."
+        }
+    }
+}
+
 final class MaskerModel: ObservableObject {
     private struct MaskSetExport: Codable {
         let format: String
@@ -94,6 +143,7 @@ final class MaskerModel: ObservableObject {
     private static let recentPDFPathsKey = "recentPDFPaths"
     private static let maskValuesByPDFPathKey = "maskValuesByPDFPath"
     private static let maskReplacementsByPDFPathKey = "maskReplacementsByPDFPath"
+    private static let includeAttributionFooterKey = "includeAttributionFooter"
     private static let maximumRecentPDFs = 10
     static let replacementFonts: [(name: String, label: String)] = [
         ("Helvetica-Bold", "Helvetica Bold"),
@@ -122,6 +172,9 @@ final class MaskerModel: ObservableObject {
     @Published var activeFileURL: URL?
     @Published var currentPreviewPage = 0
     @Published var outputFolder: URL?
+    @Published var includeAttributionFooter: Bool {
+        didSet { userDefaults.set(includeAttributionFooter, forKey: Self.includeAttributionFooterKey) }
+    }
     @Published var isBusy = false
     @Published var status = "Drop PDFs here or choose files."
     @Published var showingError = false
@@ -138,6 +191,14 @@ final class MaskerModel: ObservableObject {
     @Published private(set) var batchConversionTotal = 0
     @Published private(set) var batchConversionProcessed = 0
     @Published private(set) var batchConversionFailed = 0
+    @Published var showingPresidioDiscovery = false
+    @Published private(set) var presidioCandidates: [PresidioCandidate] = []
+    @Published var selectedPresidioCandidateIDs = Set<String>()
+    @Published var presidioMinimumScore = 0.35
+    @Published private(set) var presidioIsInstalled = PresidioDiscoveryService.isInstalled
+    @Published private(set) var presidioIsBusy = false
+    @Published private(set) var presidioMessage = ""
+    @Published var showingMaskSetManager = false
 
     private var lastScannedDiscoveryDocumentID: String?
     private var activeWorkflow: String?
@@ -146,9 +207,17 @@ final class MaskerModel: ObservableObject {
 
     var selectedCount: Int { matches.filter(\.isSelected).count }
     var batchConversionIsVisible: Bool { activeWorkflow == "batch_convert" && batchConversionTotal > 0 }
+    var selectedPresidioCandidateCount: Int {
+        presidioCandidates.filter {
+            $0.score >= presidioMinimumScore && selectedPresidioCandidateIDs.contains($0.id)
+        }.count
+    }
 
     init(userDefaults: UserDefaults = .standard) {
         self.userDefaults = userDefaults
+        includeAttributionFooter = userDefaults.object(forKey: Self.includeAttributionFooterKey) == nil
+            ? true
+            : userDefaults.bool(forKey: Self.includeAttributionFooterKey)
         let storedPaths = userDefaults.stringArray(forKey: Self.recentPDFPathsKey) ?? []
         recentFiles = storedPaths
             .map { URL(fileURLWithPath: $0).standardizedFileURL }
@@ -394,6 +463,7 @@ final class MaskerModel: ObservableObject {
                     ).normalized
                 )
             })
+            let includeFooter = includeAttributionFooter
 
             activeWorkflow = "batch_convert"
             batchConversionTotal = documents.count
@@ -423,7 +493,8 @@ final class MaskerModel: ObservableObject {
                             outputFolder: targetFolder,
                             replacementsByValue: replacements,
                             replacementStylesByValue: styles,
-                            includeUnmatchedFiles: true
+                            includeUnmatchedFiles: true,
+                            includeAttributionFooter: includeFooter
                         ) { message in
                             DispatchQueue.main.async { self.status = message }
                         }
@@ -711,6 +782,48 @@ final class MaskerModel: ObservableObject {
     }
 
     var maskSetValueCount: Int { currentMaskEntries().count }
+    var maskSetLabeledCount: Int { currentMaskEntries().filter { !$0.replaceWith.isEmpty }.count }
+
+    func managedMaskEntries() -> [ManagedMaskEntry] {
+        currentMaskEntries().map { ManagedMaskEntry(entry: $0) }
+    }
+
+    @discardableResult
+    func applyManagedMaskEntries(_ managedEntries: [ManagedMaskEntry]) throws -> Int {
+        let oldEntries = currentMaskEntries()
+        let oldKeys = Set(oldEntries.map { PDFMasker.normalizedReplacementKey(for: $0.value) })
+        var seen = Set<String>()
+        var entries: [MaskValueEntry] = []
+        for managed in managedEntries {
+            var entry = managed.maskValueEntry
+            guard !entry.value.isEmpty else { throw MaskSetManagementError.emptyValue }
+            let key = PDFMasker.normalizedReplacementKey(for: entry.value)
+            guard seen.insert(key).inserted else {
+                throw MaskSetManagementError.duplicateValue(entry.value)
+            }
+            entry.fontName = normalizedReplacementFont(entry.fontName)
+            entry.fontSize = entry.fontSize.map { min(max($0, 4), 24) }
+            entry.widthPercent = entry.widthPercent.map { min(max($0, 35), 100) }
+            entry.justification = ReplacementLabelAlignment(rawValue: entry.justification ?? "")?.rawValue
+            entries.append(entry)
+        }
+
+        exactValues = entries.map(\.value).joined(separator: "\n")
+        replacementEntriesByKey = Dictionary(uniqueKeysWithValues: entries.compactMap { entry in
+            guard !entry.replaceWith.isEmpty else { return nil }
+            return (PDFMasker.normalizedReplacementKey(for: entry.value), entry)
+        })
+        let newKeys = Set(entries.map { PDFMasker.normalizedReplacementKey(for: $0.value) })
+        if newKeys != oldKeys {
+            matches = []
+            selectedMatchID = nil
+            status = "Mask values changed. Scan the PDFs again before exporting."
+        } else {
+            status = "Updated \(entries.count) mask value\(entries.count == 1 ? "" : "s") and labels."
+        }
+        stashMaskValuesForLoadedFiles()
+        return entries.count
+    }
 
     func currentMaskSetJSON() throws -> Data {
         let masks = currentMaskEntries()
@@ -974,6 +1087,119 @@ final class MaskerModel: ObservableObject {
         }
     }
 
+    func beginPresidioDiscovery() {
+        guard !files.isEmpty else {
+            showError("Add at least one PDF first.")
+            return
+        }
+        presidioIsInstalled = PresidioDiscoveryService.isInstalled
+        presidioMessage = presidioIsInstalled
+            ? "Ready to look for PII on this Mac."
+            : "Presidio is optional and is not installed for Masker yet."
+        showingPresidioDiscovery = true
+        if presidioIsInstalled && presidioCandidates.isEmpty {
+            runPresidioDiscovery()
+        }
+    }
+
+    func runPresidioDiscovery() {
+        guard !files.isEmpty, !presidioIsBusy else { return }
+        presidioIsInstalled = PresidioDiscoveryService.isInstalled
+        guard presidioIsInstalled else {
+            presidioMessage = PresidioDiscoveryError.notInstalled.localizedDescription
+            return
+        }
+        let inputFiles = files
+        presidioIsBusy = true
+        presidioCandidates = []
+        selectedPresidioCandidateIDs = []
+        presidioMessage = "Reading PDF text locally..."
+        DispatchQueue.global(qos: .userInitiated).async {
+            let segments = PDFMasker.presidioTextSegments(files: inputFiles) { message in
+                DispatchQueue.main.async { self.presidioMessage = message }
+            }
+            do {
+                let candidates = try PresidioDiscoveryService.analyze(
+                    segments: segments,
+                    minimumScore: 0.20
+                )
+                DispatchQueue.main.async {
+                    self.presidioCandidates = candidates
+                    self.selectedPresidioCandidateIDs = Set(
+                        candidates.filter { $0.score >= self.presidioMinimumScore }.map(\.id)
+                    )
+                    self.presidioIsBusy = false
+                    self.presidioMessage = candidates.isEmpty
+                        ? "Presidio did not suggest any PII."
+                        : "Found \(candidates.count) candidates. Choose only the values you want to mask."
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.presidioIsBusy = false
+                    self.presidioMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func installPresidio() {
+        guard !presidioIsBusy else { return }
+        presidioIsBusy = true
+        presidioMessage = "Installing the local Presidio analyzer and language model..."
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try PresidioDiscoveryService.install()
+                DispatchQueue.main.async {
+                    self.presidioIsInstalled = true
+                    self.presidioIsBusy = false
+                    self.presidioMessage = "Presidio is installed locally."
+                    self.runPresidioDiscovery()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.presidioIsInstalled = PresidioDiscoveryService.isInstalled
+                    self.presidioIsBusy = false
+                    self.presidioMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func setAllVisiblePresidioCandidates(_ selected: Bool) {
+        let visibleIDs = Set(presidioCandidates.filter { $0.score >= presidioMinimumScore }.map(\.id))
+        if selected {
+            selectedPresidioCandidateIDs.formUnion(visibleIDs)
+        } else {
+            selectedPresidioCandidateIDs.subtract(visibleIDs)
+        }
+    }
+
+    func useSelectedPresidioPhonesOnly() {
+        detectPhone = false
+        presidioMessage = "The broad US phone detector is off. Only phone values selected here will be added."
+    }
+
+    func addSelectedPresidioCandidatesAndScan() {
+        let values = presidioCandidates
+            .filter { $0.score >= presidioMinimumScore && selectedPresidioCandidateIDs.contains($0.id) }
+            .map(\.value)
+        guard !values.isEmpty else { return }
+        var existingKeys = Set(exactValues
+            .split(whereSeparator: \.isNewline)
+            .map { PDFMasker.normalizedReplacementKey(for: String($0)) })
+        var added = 0
+        for value in values {
+            let key = PDFMasker.normalizedReplacementKey(for: value)
+            guard !key.isEmpty, existingKeys.insert(key).inserted else { continue }
+            if !exactValues.isEmpty, !exactValues.hasSuffix("\n") { exactValues += "\n" }
+            exactValues += value
+            added += 1
+        }
+        showingPresidioDiscovery = false
+        status = "Added \(added) Presidio suggestion\(added == 1 ? "" : "s") to the mask set."
+        scan()
+    }
+
     func export() {
         guard selectedCount > 0 else {
             showError("Select at least one detected match to mask.")
@@ -987,6 +1213,7 @@ final class MaskerModel: ObservableObject {
         let reviewedMatches = matches
         let replacements = replacementsByValue
         let replacementStyles = replacementStylesByValue
+        let includeFooter = includeAttributionFooter
         isBusy = true
         status = "Preparing sanitized copies..."
         publishWorkflowStatus(userActionRequired: nil)
@@ -998,7 +1225,8 @@ final class MaskerModel: ObservableObject {
                     matches: reviewedMatches,
                     outputFolder: folder,
                     replacementsByValue: replacements,
-                    replacementStylesByValue: replacementStyles
+                    replacementStylesByValue: replacementStyles,
+                    includeAttributionFooter: includeFooter
                 ) { message in
                     DispatchQueue.main.async { self.status = message }
                 }
@@ -1254,6 +1482,12 @@ struct ContentView: View {
         } message: {
             Text(model.errorMessage)
         }
+        .sheet(isPresented: $model.showingPresidioDiscovery) {
+            PresidioDiscoveryView(model: model)
+        }
+        .sheet(isPresented: $model.showingMaskSetManager) {
+            MaskSetManagerView(model: model)
+        }
         .onOpenURL { url in model.handleControlURL(url) }
         .onReceive(
             model.$exactValues
@@ -1499,7 +1733,7 @@ struct ContentView: View {
                 GroupBox("2. Choose what to mask") {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 10) {
-                            HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 6) {
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text("Mask set")
                                         .font(.callout.weight(.medium))
@@ -1507,24 +1741,36 @@ struct ContentView: View {
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
                                 }
-                                Spacer()
-                                Button {
-                                    model.importMaskSet()
-                                } label: {
-                                    Label("Import", systemImage: "square.and.arrow.down")
+                                HStack(spacing: 7) {
+                                    Button {
+                                        model.showingMaskSetManager = true
+                                    } label: {
+                                        Label("Manage", systemImage: "list.bullet.rectangle")
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.small)
+                                    Spacer()
+                                    Button {
+                                        model.importMaskSet()
+                                    } label: {
+                                        Label("Import", systemImage: "square.and.arrow.down")
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                    .help("Import a generic Masker mask-set JSON file")
+                                    Button {
+                                        model.exportCurrentMaskSet()
+                                    } label: {
+                                        Label("Export", systemImage: "square.and.arrow.up")
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                    .disabled(model.maskSetValueCount == 0)
+                                    .help("Export the current values and labels as a generic JSON mask set")
                                 }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .help("Import a generic Masker mask-set JSON file")
-                                Button {
-                                    model.exportCurrentMaskSet()
-                                } label: {
-                                    Label("Export", systemImage: "square.and.arrow.up")
-                                }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .disabled(model.maskSetValueCount == 0)
-                                .help("Export the current values and labels as a generic JSON mask set")
+                                Text("\(model.maskSetValueCount) values · \(model.maskSetLabeledCount) labeled")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.secondary)
                             }
                             Text("Exact values - one per line")
                                 .font(.caption.weight(.medium))
@@ -1536,6 +1782,17 @@ struct ContentView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
                                 .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.25)))
                             Text("Examples: full name, street address, account number")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            Button {
+                                model.beginPresidioDiscovery()
+                            } label: {
+                                Label("Discover PII with Presidio...", systemImage: "sparkles.magnifyingglass")
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(model.files.isEmpty || model.isBusy)
+                            Text("Optional local NLP. Suggestions are reviewed before they are added to the mask set.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
 
@@ -1871,6 +2128,10 @@ struct ContentView: View {
                         .truncationMode(.middle)
                 }
                 Spacer()
+                Toggle("Add Masker footer", isOn: $model.includeAttributionFooter)
+                    .toggleStyle(.checkbox)
+                    .controlSize(.small)
+                    .help("Add ‘masked with https://github.com/cpatil/masker’ to the bottom of every page")
                 Button("Change...") { chooseOutputFolder() }
                 Button {
                     model.export()
@@ -1953,6 +2214,454 @@ struct ContentView: View {
             }
         }
         return handled
+    }
+}
+
+private enum MaskManagerFilter: String, CaseIterable, Identifiable {
+    case all = "All"
+    case labeled = "Labeled"
+    case unlabeled = "Unlabeled"
+
+    var id: String { rawValue }
+}
+
+private enum MaskManagerSort: String, CaseIterable, Identifiable {
+    case valueAscending = "Value A-Z"
+    case valueDescending = "Value Z-A"
+    case labelAscending = "Label A-Z"
+    case labeledFirst = "Labeled first"
+
+    var id: String { rawValue }
+}
+
+struct MaskSetManagerView: View {
+    @ObservedObject var model: MaskerModel
+    @State private var entries: [ManagedMaskEntry]
+    @State private var searchText = ""
+    @State private var filter = MaskManagerFilter.all
+    @State private var sort = MaskManagerSort.valueAscending
+    @State private var saveError = ""
+
+    init(model: MaskerModel) {
+        self.model = model
+        _entries = State(initialValue: model.managedMaskEntries())
+    }
+
+    private var validationError: String? {
+        var seen = Set<String>()
+        for entry in entries {
+            let value = entry.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !value.isEmpty else { return "Finish or delete the empty value before saving." }
+            let key = PDFMasker.normalizedReplacementKey(for: value)
+            guard seen.insert(key).inserted else { return "Duplicate value: \(value)" }
+        }
+        return nil
+    }
+
+    private var displayedEntries: [ManagedMaskEntry] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let filtered = entries.filter { entry in
+            let hasLabel = !entry.replaceWith.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let passesFilter: Bool
+            switch filter {
+            case .all: passesFilter = true
+            case .labeled: passesFilter = hasLabel
+            case .unlabeled: passesFilter = !hasLabel
+            }
+            guard passesFilter else { return false }
+            guard !query.isEmpty else { return true }
+            return entry.value.localizedCaseInsensitiveContains(query) ||
+                entry.replaceWith.localizedCaseInsensitiveContains(query)
+        }
+        return filtered.sorted { left, right in
+            switch sort {
+            case .valueAscending:
+                return left.value.localizedStandardCompare(right.value) == .orderedAscending
+            case .valueDescending:
+                return left.value.localizedStandardCompare(right.value) == .orderedDescending
+            case .labelAscending:
+                let leftLabel = left.replaceWith.trimmingCharacters(in: .whitespacesAndNewlines)
+                let rightLabel = right.replaceWith.trimmingCharacters(in: .whitespacesAndNewlines)
+                if leftLabel.isEmpty != rightLabel.isEmpty { return !leftLabel.isEmpty }
+                let comparison = leftLabel.localizedStandardCompare(rightLabel)
+                return comparison == .orderedSame
+                    ? left.value.localizedStandardCompare(right.value) == .orderedAscending
+                    : comparison == .orderedAscending
+            case .labeledFirst:
+                let leftHasLabel = !left.replaceWith.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                let rightHasLabel = !right.replaceWith.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                if leftHasLabel != rightHasLabel { return leftHasLabel }
+                return left.value.localizedStandardCompare(right.value) == .orderedAscending
+            }
+        }
+    }
+
+    private func entryBinding(for id: UUID) -> Binding<ManagedMaskEntry> {
+        Binding(
+            get: { entries.first(where: { $0.id == id }) ?? ManagedMaskEntry(id: id) },
+            set: { updated in
+                guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
+                entries[index] = updated
+                saveError = ""
+            }
+        )
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Manage mask set")
+                        .font(.title3.weight(.semibold))
+                    Text("Edit portable mask values and the labels rendered inside their black boxes.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("\(entries.count) value\(entries.count == 1 ? "" : "s")")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .padding(16)
+
+            Divider()
+
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("Filter values or labels", text: $searchText)
+                    .textFieldStyle(.roundedBorder)
+                Picker("Filter", selection: $filter) {
+                    ForEach(MaskManagerFilter.allCases) { option in
+                        Text(option.rawValue).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 235)
+                Picker("Sort", selection: $sort) {
+                    ForEach(MaskManagerSort.allCases) { option in
+                        Text(option.rawValue).tag(option)
+                    }
+                }
+                .frame(width: 145)
+                Button {
+                    entries.append(ManagedMaskEntry())
+                    searchText = ""
+                    filter = .all
+                    saveError = ""
+                } label: {
+                    Label("Add", systemImage: "plus")
+                }
+            }
+            .padding(12)
+
+            Divider()
+
+            HStack(spacing: 12) {
+                Text("MASK VALUE")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("REPLACE WITH")
+                    .frame(width: 190, alignment: .leading)
+                Text("STYLE")
+                    .frame(width: 48, alignment: .center)
+                Color.clear.frame(width: 24, height: 1)
+            }
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 7)
+
+            Divider()
+
+            if displayedEntries.isEmpty {
+                VStack(spacing: 9) {
+                    Image(systemName: entries.isEmpty ? "list.bullet.rectangle" : "line.3.horizontal.decrease.circle")
+                        .font(.system(size: 30))
+                        .foregroundStyle(.secondary)
+                    Text(entries.isEmpty ? "No mask values yet." : "No values match this filter.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    if entries.isEmpty {
+                        Button("Add a value") {
+                            entries.append(ManagedMaskEntry())
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(displayedEntries) { entry in
+                            let binding = entryBinding(for: entry.id)
+                            HStack(spacing: 12) {
+                                TextField("Value to mask", text: binding.value)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(.body, design: .monospaced))
+                                    .frame(maxWidth: .infinity)
+                                TextField("Optional label", text: binding.replaceWith)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 190)
+                                Menu {
+                                    Picker("Font", selection: binding.fontName) {
+                                        ForEach(Array(MaskerModel.replacementFonts.enumerated()), id: \.offset) { _, font in
+                                            Text(font.label).tag(font.name)
+                                        }
+                                    }
+                                    Picker("Maximum size", selection: binding.fontSize) {
+                                        Text("Auto").tag(0.0)
+                                        ForEach([6.0, 8.0, 10.0, 12.0, 16.0], id: \.self) { size in
+                                            Text("\(Int(size)) pt").tag(size)
+                                        }
+                                    }
+                                    Picker("Label width", selection: binding.widthPercent) {
+                                        ForEach([50.0, 75.0, 100.0], id: \.self) { width in
+                                            Text("\(Int(width))%").tag(width)
+                                        }
+                                    }
+                                    Picker("Alignment", selection: binding.justification) {
+                                        Label("Left", systemImage: "text.alignleft").tag(ReplacementLabelAlignment.left.rawValue)
+                                        Label("Center", systemImage: "text.aligncenter").tag(ReplacementLabelAlignment.center.rawValue)
+                                        Label("Right", systemImage: "text.alignright").tag(ReplacementLabelAlignment.right.rawValue)
+                                    }
+                                } label: {
+                                    Image(systemName: "textformat")
+                                        .frame(width: 34)
+                                }
+                                .frame(width: 48)
+                                .menuStyle(.borderlessButton)
+                                .menuIndicator(.hidden)
+                                .disabled(binding.wrappedValue.replaceWith.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                .help("Label font, size, width, and alignment")
+                                Button(role: .destructive) {
+                                    entries.removeAll { $0.id == entry.id }
+                                    saveError = ""
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.secondary)
+                                .help("Delete this mask value")
+                                .frame(width: 24)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            Divider().padding(.leading, 16)
+                        }
+                    }
+                }
+                .background(Color(nsColor: .textBackgroundColor))
+            }
+
+            Divider()
+
+            HStack(spacing: 10) {
+                let labeledCount = entries.filter {
+                    !$0.replaceWith.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                }.count
+                Text("\(labeledCount) labeled · \(entries.count - labeledCount) black box only")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                if let validationError {
+                    Text(validationError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(1)
+                } else if !saveError.isEmpty {
+                    Text(saveError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Button("Cancel") { model.showingMaskSetManager = false }
+                Button("Save changes") {
+                    do {
+                        try model.applyManagedMaskEntries(entries)
+                        model.showingMaskSetManager = false
+                    } catch {
+                        saveError = error.localizedDescription
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(validationError != nil)
+            }
+            .padding(14)
+        }
+        .frame(width: 840, height: 620)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+struct PresidioDiscoveryView: View {
+    @ObservedObject var model: MaskerModel
+
+    private var visibleCandidates: [PresidioCandidate] {
+        model.presidioCandidates.filter { $0.score >= model.presidioMinimumScore }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Discover PII with Presidio")
+                        .font(.title3.weight(.semibold))
+                    Text("Local suggestions only. Nothing is masked until you add selected values.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Done") { model.showingPresidioDiscovery = false }
+            }
+            .padding(16)
+
+            Divider()
+
+            if !model.presidioIsInstalled {
+                VStack(spacing: 14) {
+                    Image(systemName: "shippingbox")
+                        .font(.system(size: 34))
+                        .foregroundStyle(.secondary)
+                    Text("Set up Presidio")
+                        .font(.headline)
+                    Text("This installs Microsoft Presidio Analyzer and its English language model for Masker. The download happens only when you choose Install; document analysis stays on this Mac.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 460)
+                    Button("Install Presidio") { model.installPresidio() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.presidioIsBusy)
+                    if model.presidioIsBusy { ProgressView() }
+                    Text(model.presidioMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(28)
+            } else {
+                VStack(spacing: 8) {
+                    HStack(spacing: 12) {
+                        Text("Minimum confidence")
+                            .font(.callout.weight(.medium))
+                        Slider(value: $model.presidioMinimumScore, in: 0.20...1.0, step: 0.05)
+                        Text("\(Int(model.presidioMinimumScore * 100))%")
+                            .font(.callout.monospacedDigit())
+                            .frame(width: 42, alignment: .trailing)
+                    }
+                    HStack(spacing: 8) {
+                        Text("Showing \(visibleCandidates.count) of \(model.presidioCandidates.count)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("All") { model.setAllVisiblePresidioCandidates(true) }
+                        Button("None") { model.setAllVisiblePresidioCandidates(false) }
+                        Button {
+                            model.runPresidioDiscovery()
+                        } label: {
+                            Label("Run again", systemImage: "arrow.clockwise")
+                        }
+                        .disabled(model.presidioIsBusy)
+                    }
+                    if model.detectPhone {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                            Text("US phone numbers is on and will still match phones you leave unchecked here.")
+                                .font(.caption)
+                            Spacer()
+                            Button("Use selected phones only") {
+                                model.useSelectedPresidioPhonesOnly()
+                            }
+                        }
+                    }
+                }
+                .controlSize(.small)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+
+                Divider()
+
+                if model.presidioIsBusy {
+                    VStack(spacing: 10) {
+                        ProgressView()
+                        Text(model.presidioMessage)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if visibleCandidates.isEmpty {
+                    VStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle")
+                            .font(.system(size: 30))
+                            .foregroundStyle(.secondary)
+                        Text(model.presidioMessage)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(visibleCandidates) { candidate in
+                                HStack(spacing: 10) {
+                                    Toggle(
+                                        "",
+                                        isOn: Binding(
+                                            get: { model.selectedPresidioCandidateIDs.contains(candidate.id) },
+                                            set: { selected in
+                                                if selected {
+                                                    model.selectedPresidioCandidateIDs.insert(candidate.id)
+                                                } else {
+                                                    model.selectedPresidioCandidateIDs.remove(candidate.id)
+                                                }
+                                            }
+                                        )
+                                    )
+                                    .labelsHidden()
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(candidate.value)
+                                            .font(.system(.body, design: .monospaced))
+                                            .lineLimit(1)
+                                        Text(candidate.displayType)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Text("\(candidate.occurrences)×")
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                    Text("\(Int(candidate.score * 100))%")
+                                        .font(.caption.monospacedDigit())
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 36, alignment: .trailing)
+                                }
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 9)
+                                Divider().padding(.leading, 48)
+                            }
+                        }
+                    }
+                    .background(Color(nsColor: .textBackgroundColor))
+                }
+
+                Divider()
+                HStack {
+                    Text(model.presidioMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer()
+                    Button("Add selected & scan") {
+                        model.addSelectedPresidioCandidatesAndScan()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.selectedPresidioCandidateCount == 0 || model.presidioIsBusy)
+                }
+                .padding(14)
+            }
+        }
+        .frame(width: 680, height: 560)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 }
 

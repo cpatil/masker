@@ -22,6 +22,7 @@ swiftc \
   -framework PDFKit \
   -framework Vision \
   "$project_dir/Sources/MaskerCore.swift" \
+  "$project_dir/Sources/PresidioDiscovery.swift" \
   "$project_dir/Tests/PrivateCorpusSmokeTest.swift" \
   -o "$project_dir/.build/private-corpus-smoke-test"
 

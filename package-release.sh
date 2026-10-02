@@ -29,6 +29,7 @@ compile_arch() {
     -framework Vision \
     "$project_dir/Sources/Workflows.swift" \
     "$project_dir/Sources/MaskerCore.swift" \
+    "$project_dir/Sources/PresidioDiscovery.swift" \
     "$project_dir/Sources/MaskerApp.swift" \
     -o "$build_dir/Masker-$architecture"
 }
@@ -38,6 +39,8 @@ compile_arch x86_64
 
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
 cp "$project_dir/Info.plist" "$app_dir/Contents/Info.plist"
+cp "$project_dir/presidio/presidio_helper.py" "$app_dir/Contents/Resources/presidio_helper.py"
+cp "$project_dir/presidio/install_presidio.sh" "$app_dir/Contents/Resources/install_presidio.sh"
 lipo -create "$build_dir/Masker-arm64" "$build_dir/Masker-x86_64" -output "$app_dir/Contents/MacOS/Masker"
 codesign --force --deep --sign - "$app_dir"
 

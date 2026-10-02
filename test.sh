@@ -18,6 +18,7 @@ swiftc \
   -framework PDFKit \
   -framework Vision \
   "$project_dir/Sources/MaskerCore.swift" \
+  "$project_dir/Sources/PresidioDiscovery.swift" \
   "$project_dir/Tests/MaskerSelfTest.swift" \
   -o "$project_dir/.build/masker-self-test"
 
@@ -45,11 +46,12 @@ swiftc \
   -framework Vision \
   "$project_dir/Sources/Workflows.swift" \
   "$project_dir/Sources/MaskerCore.swift" \
+  "$project_dir/Sources/PresidioDiscovery.swift" \
   "$project_dir/Sources/MaskerApp.swift" \
   "$project_dir/Tests/MaskerUISnapshot.swift" \
   -o "$project_dir/.build/masker-ui-snapshot"
 
-env MASKER_SNAPSHOT_VERSION="v1.8.1" \
+env MASKER_SNAPSHOT_VERSION="v1.10.0" \
   "$project_dir/.build/masker-ui-snapshot" \
   "$test_root/sample-tax-document.pdf" \
   "$test_root/ui-snapshot.png"

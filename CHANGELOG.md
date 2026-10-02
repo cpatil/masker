@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.10.0 - 2026-08-26
+
+- Adds a first-class mask-set manager for values and replacement labels.
+- Adds search, labeled/unlabeled filters, and value/label sorting for large reusable sets.
+- Supports adding, renaming, and deleting values without editing the raw multiline list.
+- Exposes label text, font, maximum size, width, and alignment in the same manager.
+- Rejects empty and case-insensitive duplicate values before saving.
+- Keeps label-only edits live, while value changes clear stale matches and require a fresh scan.
+
+## 1.9.0 - 2026-08-26
+
+- Adds optional local PII discovery with Microsoft Presidio Analyzer.
+- Shows each suggested value with its entity type, confidence, and occurrence count before it can enter the mask set.
+- Adds confidence filtering plus All/None controls so broad detectors such as phone numbers can be narrowed value by value.
+- Sends only locally extracted page text to the local Presidio child process; PDF paths and filenames are never included.
+- Keeps Presidio optional. The existing exact matching, built-in detectors, scanning, and export work without Python.
+
+## 1.8.2 - 2026-08-25
+
+- Adds a small `masked with https://github.com/cpatil/masker` footer to every page of sanitized PDFs.
+- Adds a persistent **Add Masker footer** option beside the export controls; disabling it produces the previous footer-free output.
+- Burns the footer into the page image without adding searchable text or annotations, including during batch conversion.
+
 ## 1.8.1 - 2026-08-25
 
 - Removes the static **Offline** badge from the header. Local processing is already stated in the app subtitle and explanatory text.

@@ -95,6 +95,8 @@ enum MaskerError: LocalizedError {
 }
 
 enum PDFMasker {
+    static let attributionFooterText = "masked with https://github.com/cpatil/masker"
+
     private struct ReplacementOverlay {
         let rects: [CGRect]
         let label: String
@@ -127,6 +129,43 @@ enum PDFMasker {
         let value: String
         let requiresDigitBoundaries: Bool
         let requiresTokenBoundaries: Bool
+    }
+
+    static func presidioTextSegments(
+        files: [URL],
+        shouldCancel: @escaping () -> Bool = { false },
+        progress: @escaping (String) -> Void
+    ) -> [PresidioInputSegment] {
+        var segments: [PresidioInputSegment] = []
+        for (documentIndex, fileURL) in files.enumerated() {
+            if shouldCancel() { break }
+            guard let document = PDFDocument(url: fileURL) else { continue }
+            for pageIndex in 0..<document.pageCount {
+                if shouldCancel() { break }
+                autoreleasepool {
+                    progress("Reading page \(pageIndex + 1) of \(document.pageCount) for private PII discovery")
+                    guard let page = document.page(at: pageIndex) else { return }
+                    var text = page.string ?? ""
+                    if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                       let observations = recognizedTextObservations(
+                           page,
+                           fileURL: fileURL,
+                           pageIndex: pageIndex,
+                           shouldCancel: shouldCancel
+                       ) {
+                        text = observations.compactMap { $0.topCandidates(1).first?.string }
+                            .joined(separator: "\n")
+                    }
+                    guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                    segments.append(PresidioInputSegment(
+                        documentIndex: documentIndex,
+                        pageIndex: pageIndex,
+                        text: text
+                    ))
+                }
+            }
+        }
+        return segments
     }
 
     static func scan(
@@ -224,6 +263,7 @@ enum PDFMasker {
         replacementsByValue: [String: String] = [:],
         replacementStylesByValue: [String: ReplacementLabelStyle] = [:],
         includeUnmatchedFiles: Bool = false,
+        includeAttributionFooter: Bool = true,
         dpi: CGFloat = 300,
         progress: @escaping (String) -> Void
     ) throws -> [URL] {
@@ -236,10 +276,12 @@ enum PDFMasker {
             }
             if fileMatches.isEmpty {
                 guard includeUnmatchedFiles else { continue }
-                let outputURL = uniqueOutputURL(for: fileURL, in: outputFolder)
-                try FileManager.default.copyItem(at: fileURL, to: outputURL)
-                outputs.append(outputURL)
-                continue
+                if !includeAttributionFooter {
+                    let outputURL = uniqueOutputURL(for: fileURL, in: outputFolder)
+                    try FileManager.default.copyItem(at: fileURL, to: outputURL)
+                    outputs.append(outputURL)
+                    continue
+                }
             }
             guard let document = PDFDocument(url: fileURL) else { throw MaskerError.cannotOpen(fileURL) }
 
@@ -294,7 +336,8 @@ enum PDFMasker {
                             page,
                             dpi: dpi,
                             redactionRects: redactionRects,
-                            replacementOverlays: replacementOverlays
+                            replacementOverlays: replacementOverlays,
+                            footerText: includeAttributionFooter ? attributionFooterText : nil
                         ) else {
                             context.endPDFPage()
                             throw MaskerError.cannotRender(page: pageIndex, file: fileURL)
@@ -319,7 +362,8 @@ enum PDFMasker {
                 sourceDocument: document,
                 matches: fileMatches,
                 replacementsByValue: replacementsByValue,
-                replacementStylesByValue: replacementStylesByValue
+                replacementStylesByValue: replacementStylesByValue,
+                includeAttributionFooter: includeAttributionFooter
             ) {
                 try? FileManager.default.removeItem(at: outputURL)
                 throw MaskerError.outputValidationFailed(outputURL, validationFailure)
@@ -1063,7 +1107,8 @@ enum PDFMasker {
         _ page: PDFPage,
         dpi: CGFloat,
         redactionRects: [CGRect],
-        replacementOverlays: [ReplacementOverlay] = []
+        replacementOverlays: [ReplacementOverlay] = [],
+        footerText: String? = nil
     ) -> CGImage? {
         let scale = max(dpi / 72.0, 1.0)
         let pageBounds = page.bounds(for: .mediaBox)
@@ -1134,7 +1179,32 @@ enum PDFMasker {
                 )
             }
         }
+        if let footerText {
+            drawAttributionFooter(footerText, in: displaySize, context: bitmap)
+        }
         return bitmap.makeImage()
+    }
+
+    private static func drawAttributionFooter(
+        _ text: String,
+        in pageSize: CGSize,
+        context: CGContext
+    ) {
+        let font = CTFontCreateWithName("Helvetica" as CFString, 7, nil)
+        let attributes: [CFString: Any] = [
+            kCTFontAttributeName: font,
+            kCTForegroundColorAttributeName: NSColor(calibratedWhite: 0.38, alpha: 1).cgColor
+        ]
+        let line = CTLineCreateWithAttributedString(
+            CFAttributedStringCreate(nil, text as CFString, attributes as CFDictionary)
+        )
+        let bounds = CTLineGetBoundsWithOptions(line, [.useOpticalBounds])
+        let x = max(pageSize.width - bounds.width - 12, 8)
+        context.saveGState()
+        context.textMatrix = .identity
+        context.textPosition = CGPoint(x: x, y: 14)
+        CTLineDraw(line, context)
+        context.restoreGState()
     }
 
     static func drawReplacementLabel(
@@ -1227,14 +1297,16 @@ enum PDFMasker {
         sourceDocument: PDFDocument,
         matches: [RedactionMatch],
         replacementsByValue: [String: String] = [:],
-        replacementStylesByValue: [String: ReplacementLabelStyle] = [:]
+        replacementStylesByValue: [String: ReplacementLabelStyle] = [:],
+        includeAttributionFooter: Bool = true
     ) -> Bool {
         sanitizedOutputValidationFailure(
             url,
             sourceDocument: sourceDocument,
             matches: matches,
             replacementsByValue: replacementsByValue,
-            replacementStylesByValue: replacementStylesByValue
+            replacementStylesByValue: replacementStylesByValue,
+            includeAttributionFooter: includeAttributionFooter
         ) == nil
     }
 
@@ -1243,7 +1315,8 @@ enum PDFMasker {
         sourceDocument: PDFDocument,
         matches: [RedactionMatch],
         replacementsByValue: [String: String] = [:],
-        replacementStylesByValue: [String: ReplacementLabelStyle] = [:]
+        replacementStylesByValue: [String: ReplacementLabelStyle] = [:],
+        includeAttributionFooter: Bool = true
     ) -> String? {
         guard let output = PDFDocument(url: url) else { return "the output could not be reopened" }
         guard output.pageCount == sourceDocument.pageCount else { return "the page count changed" }
@@ -1282,7 +1355,8 @@ enum PDFMasker {
                     sourcePage,
                     dpi: 72,
                     redactionRects: redactionRects,
-                    replacementOverlays: replacementOverlays
+                    replacementOverlays: replacementOverlays,
+                    footerText: includeAttributionFooter ? attributionFooterText : nil
                   ),
                   let outputImage = renderPage(outputPage, dpi: 72, redactionRects: []),
                   imagesAreVisuallyEquivalent(expectedImage, outputImage) else {

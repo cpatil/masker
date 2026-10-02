@@ -22,6 +22,41 @@ struct MaskerSelfTest {
 
         try makeSamplePDF(at: source)
         try makeBoundaryPDF(at: boundarySource)
+
+        let presidioSegments = PDFMasker.presidioTextSegments(files: [source], progress: { _ in })
+        try require(!presidioSegments.isEmpty, "Presidio discovery did not extract local page text")
+        let presidioInput = try JSONEncoder().encode(presidioSegments)
+        let presidioInputString = String(decoding: presidioInput, as: UTF8.self)
+        try require(
+            !presidioInputString.contains(source.path) && !presidioInputString.contains(source.lastPathComponent),
+            "Presidio input disclosed a PDF path or filename"
+        )
+        let presidioStub = root.appendingPathComponent("presidio-test-helper.py")
+        let stubSource = """
+        import json, sys
+        request = json.load(sys.stdin)
+        assert request["segments"]
+        assert all(set(item.keys()) == {"documentIndex", "pageIndex", "text"} for item in request["segments"])
+        json.dump({"candidates": [{"value": "(415) 555-0198", "entityType": "PHONE_NUMBER", "score": 0.91, "occurrences": 1}]}, sys.stdout)
+        """
+        try Data(stubSource.utf8).write(to: presidioStub, options: .atomic)
+        setenv("MASKER_PRESIDIO_PYTHON", "/usr/bin/python3", 1)
+        setenv("MASKER_PRESIDIO_HELPER", presidioStub.path, 1)
+        let presidioCandidates = try PresidioDiscoveryService.analyze(
+            segments: presidioSegments,
+            minimumScore: 0.20
+        )
+        unsetenv("MASKER_PRESIDIO_PYTHON")
+        unsetenv("MASKER_PRESIDIO_HELPER")
+        try require(
+            presidioCandidates == [PresidioCandidate(
+                value: "(415) 555-0198",
+                entityType: "PHONE_NUMBER",
+                score: 0.91,
+                occurrences: 1
+            )],
+            "Masker could not decode local Presidio suggestions"
+        )
         if let doc = PDFDocument(url: source) {
             report("Page strings: \((0..<doc.pageCount).map { String(describing: doc.page(at: $0)?.string) })")
         }
@@ -296,6 +331,10 @@ struct MaskerSelfTest {
             progress: { _ in }
         )
         try require(created.count == 1, "Expected one output")
+        try require(
+            PDFMasker.attributionFooterText == "masked with https://github.com/cpatil/masker",
+            "Unexpected export attribution text"
+        )
         guard let output = PDFDocument(url: created[0]) else { fatalError("Could not reopen output") }
         try require(output.pageCount == 5, "Expected five pages")
         try require((0..<output.pageCount).allSatisfy { (output.page(at: $0)?.string ?? "").isEmpty }, "Output still has a text layer")
@@ -304,6 +343,31 @@ struct MaskerSelfTest {
         let corruptOutput = root.appendingPathComponent("deliberately-corrupted-output.pdf")
         try makeVisuallyCorruptedPDF(at: corruptOutput, pageCount: 5)
         guard let sourceDocument = PDFDocument(url: source) else { fatalError("Could not reopen source") }
+        let noFooterOutputs = root.appendingPathComponent("outputs-without-footer", isDirectory: true)
+        let noFooterCreated = try PDFMasker.exportSanitizedCopies(
+            files: [source],
+            matches: matches + [pathologicalRect],
+            outputFolder: noFooterOutputs,
+            replacementsByValue: replacements,
+            replacementStylesByValue: replacementStyles,
+            includeAttributionFooter: false,
+            progress: { _ in }
+        )
+        guard let noFooterOutput = PDFDocument(url: noFooterCreated[0]) else {
+            fatalError("Could not reopen output without footer")
+        }
+        try require(noFooterOutput.pageCount == output.pageCount, "Disabling the footer changed the page count")
+        try require(
+            PDFMasker.validateSanitizedOutput(
+                noFooterCreated[0],
+                sourceDocument: sourceDocument,
+                matches: matches + [pathologicalRect],
+                replacementsByValue: replacements,
+                replacementStylesByValue: replacementStyles,
+                includeAttributionFooter: false
+            ),
+            "Output without footer failed validation"
+        )
         let corruptFailure = PDFMasker.sanitizedOutputValidationFailure(
             corruptOutput,
             sourceDocument: sourceDocument,
@@ -315,12 +379,28 @@ struct MaskerSelfTest {
         try require(corruptFailure?.contains("page 1") == true, "Visual validation did not identify the corrupted page")
 
         let residual = PDFMasker.scan(
-            files: created,
+            files: noFooterCreated,
             exactTerms: ["Alex & Jordan", "Jordan", "PATI", "Example Person", fullFarmerName, joeFarmerVariant, "123-45-6789", "123456789", "444-55-6666", "555-66-7777", "98-7654321", "987654321", "alpha@example.com", "(415) 555-0198"] + expectedSuffixes,
             options: PatternOptions(detectSSN: true, detectEIN: true, detectEmail: true, detectPhone: true, generateNameVariants: true, detectAccountSuffixes: true),
             progress: { _ in }
         )
-        try require(residual.isEmpty, "OCR found sensitive text after sanitization: \(residual.map(\.matchedText))")
+        try require(
+            residual.isEmpty,
+            "OCR found sensitive text after sanitization: \(residual.map { "[\($0.category)] \($0.matchedText)" })"
+        )
+
+        let footerMatches = PDFMasker.scan(
+            files: created,
+            exactTerms: ["github.com/cpatil/masker"],
+            options: PatternOptions(
+                detectSSN: false,
+                detectEIN: false,
+                detectEmail: false,
+                detectPhone: false
+            ),
+            progress: { _ in }
+        )
+        try require(!footerMatches.isEmpty, "The enabled attribution footer was not visibly rendered")
 
         let preservedParticipation = PDFMasker.scan(
             files: created,

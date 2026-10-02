@@ -170,6 +170,77 @@ struct MaskerUISnapshot {
             fillLabelModel.replacementText(for: "joe and mary farmer") == "Client",
             "Imported label did not fill an existing unlabeled value"
         )
+
+        let managerModel = MaskerModel(userDefaults: testDefaults)
+        managerModel.exactValues = "BETA VALUE\nALPHA VALUE"
+        managerModel.setReplacementText("Old label", for: "ALPHA VALUE")
+        managerModel.matches = Array(reviewMatches.prefix(1))
+        var managedEntries = managerModel.managedMaskEntries()
+        guard let alphaIndex = managedEntries.firstIndex(where: { $0.value == "ALPHA VALUE" }) else {
+            preconditionFailure("Mask manager did not load ALPHA VALUE")
+        }
+        managedEntries[alphaIndex].value = "ALPHA UPDATED"
+        managedEntries[alphaIndex].replaceWith = "Primary client"
+        managedEntries[alphaIndex].fontName = "Times-Bold"
+        managedEntries[alphaIndex].fontSize = 10
+        managedEntries[alphaIndex].widthPercent = 75
+        managedEntries[alphaIndex].justification = ReplacementLabelAlignment.left.rawValue
+        managedEntries.removeAll { $0.value == "BETA VALUE" }
+        managedEntries.append(ManagedMaskEntry(value: "GAMMA VALUE"))
+        let managedCount = try managerModel.applyManagedMaskEntries(managedEntries)
+        precondition(managedCount == 2, "Mask manager did not save two values")
+        precondition(
+            Set(managerModel.exactValues.split(whereSeparator: \.isNewline).map(String.init)) ==
+                Set(["ALPHA UPDATED", "GAMMA VALUE"]),
+            "Mask manager did not apply add, edit, and delete changes"
+        )
+        precondition(managerModel.matches.isEmpty, "Changing managed values did not invalidate stale matches")
+        precondition(managerModel.replacementText(for: "alpha updated") == "Primary client", "Managed label was not saved")
+        precondition(managerModel.replacementFontName(for: "alpha updated") == "Times-Bold", "Managed font was not saved")
+        precondition(managerModel.replacementFontSize(for: "alpha updated") == 10, "Managed font size was not saved")
+        precondition(managerModel.replacementWidthPercent(for: "alpha updated") == 75, "Managed label width was not saved")
+        precondition(managerModel.replacementJustification(for: "alpha updated") == "left", "Managed alignment was not saved")
+        let managedJSON = try managerModel.currentMaskSetJSON()
+        let managedObject = try JSONSerialization.jsonObject(with: managedJSON) as? [String: Any]
+        let managedMasks = managedObject?["masks"] as? [[String: Any]]
+        precondition(
+            managedMasks?.contains(where: {
+                $0["value"] as? String == "ALPHA UPDATED" &&
+                    $0["replaceWith"] as? String == "Primary client" &&
+                    $0["fontName"] as? String == "Times-Bold" &&
+                    $0["fontSize"] as? Double == 10 &&
+                    $0["widthPercent"] as? Double == 75 &&
+                    $0["justification"] as? String == "left"
+            }) == true,
+            "Managed value-label mapping did not survive JSON export"
+        )
+        var duplicateRejected = false
+        do {
+            _ = try managerModel.applyManagedMaskEntries([
+                ManagedMaskEntry(value: "Duplicate"),
+                ManagedMaskEntry(value: "duplicate")
+            ])
+        } catch MaskSetManagementError.duplicateValue {
+            duplicateRejected = true
+        }
+        precondition(duplicateRejected, "Mask manager accepted a case-insensitive duplicate")
+        precondition(
+            Set(managerModel.exactValues.split(whereSeparator: \.isNewline).map(String.init)) ==
+                Set(["ALPHA UPDATED", "GAMMA VALUE"]),
+            "A rejected duplicate partially changed the mask set"
+        )
+        managerModel.matches = Array(reviewMatches.prefix(1))
+        var labelOnlyEntries = managerModel.managedMaskEntries()
+        guard let labelOnlyIndex = labelOnlyEntries.firstIndex(where: { $0.value == "ALPHA UPDATED" }) else {
+            preconditionFailure("Managed label-only test value is missing")
+        }
+        labelOnlyEntries[labelOnlyIndex].replaceWith = "Updated client label"
+        _ = try managerModel.applyManagedMaskEntries(labelOnlyEntries)
+        precondition(managerModel.matches.count == 1, "A label-only edit incorrectly cleared valid matches")
+        precondition(
+            managerModel.replacementText(for: "alpha updated") == "Updated client label",
+            "A label-only edit was not applied"
+        )
         try? FileManager.default.removeItem(at: exportedFile)
 
         let legacyV2Object: [String: Any] = [
@@ -243,6 +314,136 @@ struct MaskerUISnapshot {
             fatalError("Could not encode snapshot")
         }
         try png.write(to: output)
+
+        let presidioStub = output.deletingLastPathComponent()
+            .appendingPathComponent("presidio-ui-helper.py")
+        let presidioStubSource = """
+        import json, sys
+        json.load(sys.stdin)
+        json.dump({"candidates": [
+          {"value": "(415) 555-0198", "entityType": "PHONE_NUMBER", "score": 0.92, "occurrences": 2},
+          {"value": "800-829-1040", "entityType": "PHONE_NUMBER", "score": 0.40, "occurrences": 1},
+          {"value": "Example Person", "entityType": "PERSON", "score": 0.88, "occurrences": 1},
+          {"value": "alpha@example.com", "entityType": "EMAIL_ADDRESS", "score": 0.84, "occurrences": 1},
+          {"value": "California", "entityType": "LOCATION", "score": 0.25, "occurrences": 1}
+        ]}, sys.stdout)
+        """
+        try Data(presidioStubSource.utf8).write(to: presidioStub, options: .atomic)
+        setenv("MASKER_PRESIDIO_PYTHON", "/usr/bin/python3", 1)
+        setenv("MASKER_PRESIDIO_HELPER", presidioStub.path, 1)
+        defer {
+            unsetenv("MASKER_PRESIDIO_PYTHON")
+            unsetenv("MASKER_PRESIDIO_HELPER")
+            try? FileManager.default.removeItem(at: presidioStub)
+        }
+        let presidioModel = MaskerModel(userDefaults: testDefaults)
+        presidioModel.addFiles([input])
+        presidioModel.detectPhone = true
+        presidioModel.runPresidioDiscovery()
+        let presidioDeadline = Date().addingTimeInterval(30)
+        while presidioModel.presidioIsBusy, Date() < presidioDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
+        precondition(presidioModel.presidioIsInstalled, "Presidio test helper was not detected")
+        precondition(presidioModel.presidioCandidates.count == 5, "Presidio candidate list did not load")
+        precondition(presidioModel.selectedPresidioCandidateCount == 4, "Confidence filtering did not select four candidates")
+        let retainedPhoneID = presidioModel.presidioCandidates.first { $0.value == "800-829-1040" }?.id
+        precondition(retainedPhoneID != nil, "Second phone suggestion is missing")
+        presidioModel.selectedPresidioCandidateIDs.remove(retainedPhoneID!)
+        precondition(presidioModel.selectedPresidioCandidateCount == 3, "A phone suggestion could not be excluded")
+        let presidioSize = NSSize(width: 680, height: 560)
+        let presidioHosting = NSHostingView(
+            rootView: PresidioDiscoveryView(model: presidioModel)
+                .frame(width: presidioSize.width, height: presidioSize.height)
+        )
+        presidioHosting.frame = NSRect(origin: .zero, size: presidioSize)
+        let presidioWindow = NSWindow(
+            contentRect: presidioHosting.frame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        presidioWindow.contentView = presidioHosting
+        presidioWindow.appearance = NSAppearance(named: .aqua)
+        presidioWindow.orderBack(nil)
+        presidioHosting.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        guard let presidioBitmap = presidioHosting.bitmapImageRepForCachingDisplay(in: presidioHosting.bounds) else {
+            fatalError("Could not allocate Presidio snapshot bitmap")
+        }
+        presidioHosting.cacheDisplay(in: presidioHosting.bounds, to: presidioBitmap)
+        guard let presidioPNG = presidioBitmap.representation(using: .png, properties: [:]) else {
+            fatalError("Could not encode Presidio snapshot")
+        }
+        try presidioPNG.write(
+            to: output.deletingPathExtension().appendingPathExtension("presidio.png")
+        )
+        presidioWindow.orderOut(nil)
+        presidioWindow.contentView = nil
+        presidioModel.useSelectedPresidioPhonesOnly()
+        precondition(!presidioModel.detectPhone, "Selective phone mode did not turn off the broad phone detector")
+        presidioModel.addSelectedPresidioCandidatesAndScan()
+        let presidioScanDeadline = Date().addingTimeInterval(30)
+        while presidioModel.isBusy, Date() < presidioScanDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
+        let addedPresidioValues = Set(
+            presidioModel.exactValues.split(whereSeparator: \.isNewline).map(String.init)
+        )
+        precondition(addedPresidioValues.contains("(415) 555-0198"), "Selected phone was not added")
+        precondition(!addedPresidioValues.contains("800-829-1040"), "Excluded phone was added to the mask set")
+        precondition(!addedPresidioValues.contains("California"), "Below-threshold suggestion was added")
+        precondition(
+            !presidioModel.matches.contains(where: { $0.matchedText == "800-829-1040" }),
+            "Excluded phone was still matched after selective phone mode"
+        )
+
+        let managerSnapshotModel = MaskerModel(userDefaults: testDefaults)
+        managerSnapshotModel.exactValues = [
+            "JOE FARMER",
+            "MARY FARMER",
+            "1234 FAKE STREET",
+            "(415) 555-0198",
+            "alpha@example.com",
+            "111-22-3333",
+            "ACME BANK 4242",
+            "EXAMPLE PERSON"
+        ].joined(separator: "\n")
+        managerSnapshotModel.setReplacementText("Client 1", for: "JOE FARMER")
+        managerSnapshotModel.setReplacementText("Client 2", for: "MARY FARMER")
+        managerSnapshotModel.setReplacementText("Phone 1", for: "(415) 555-0198")
+        managerSnapshotModel.setReplacementText("Account 1", for: "ACME BANK 4242")
+        managerSnapshotModel.setReplacementFontName("Times-Bold", for: "ACME BANK 4242")
+        managerSnapshotModel.setReplacementJustification("left", for: "ACME BANK 4242")
+        let managerSize = NSSize(width: 840, height: 620)
+        let managerHosting = NSHostingView(
+            rootView: MaskSetManagerView(model: managerSnapshotModel)
+                .frame(width: managerSize.width, height: managerSize.height)
+        )
+        managerHosting.frame = NSRect(origin: .zero, size: managerSize)
+        let managerWindow = NSWindow(
+            contentRect: managerHosting.frame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        managerWindow.contentView = managerHosting
+        managerWindow.appearance = NSAppearance(named: .aqua)
+        managerWindow.orderBack(nil)
+        managerHosting.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        guard let managerBitmap = managerHosting.bitmapImageRepForCachingDisplay(in: managerHosting.bounds) else {
+            fatalError("Could not allocate mask manager snapshot bitmap")
+        }
+        managerHosting.cacheDisplay(in: managerHosting.bounds, to: managerBitmap)
+        guard let managerPNG = managerBitmap.representation(using: .png, properties: [:]) else {
+            fatalError("Could not encode mask manager snapshot")
+        }
+        try managerPNG.write(
+            to: output.deletingPathExtension().appendingPathExtension("mask-manager.png")
+        )
+        managerWindow.orderOut(nil)
+        managerWindow.contentView = nil
 
         model.pdfSearchText = "Example Person"
         model.addSearchTermAndRescan()
