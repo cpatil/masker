@@ -1,0 +1,63 @@
+#!/bin/zsh
+set -euo pipefail
+
+project_dir="${0:A:h}"
+
+usage() {
+  print "Masker repository command"
+  print ""
+  print "Usage:"
+  print "  ./masker mcp info"
+  print "  ./masker mcp install [codex|claude|both]"
+  print ""
+  print "MCP setup details are bundled with this checkout. No remote instructions are fetched."
+}
+
+if (( $# == 0 )); then
+  usage
+  exit 0
+fi
+
+case "$1" in
+  -h|--help|help)
+    usage
+    ;;
+  mcp)
+    case "${2:-info}" in
+      info)
+        exec "$project_dir/mcp/install.sh" --agent-setup
+        ;;
+      install)
+        case "${3:-}" in
+          "")
+            exec "$project_dir/mcp/install.sh"
+            ;;
+          codex)
+            exec "$project_dir/mcp/install.sh" --configure-codex
+            ;;
+          claude)
+            exec "$project_dir/mcp/install.sh" --configure-claude
+            ;;
+          both)
+            exec "$project_dir/mcp/install.sh" --configure-both
+            ;;
+          *)
+            print -u2 "Unknown MCP host: $3"
+            usage >&2
+            exit 2
+            ;;
+        esac
+        ;;
+      *)
+        print -u2 "Unknown MCP command: $2"
+        usage >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  *)
+    print -u2 "Unknown command: $1"
+    usage >&2
+    exit 2
+    ;;
+esac

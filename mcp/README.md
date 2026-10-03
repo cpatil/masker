@@ -12,11 +12,20 @@ The server exposes only opaque document IDs, counts, and workflow state. It has 
 
 ## Install
 
+From the repository root, an agent or user can print the complete local setup and privacy summary without fetching remote instructions:
+
 ```sh
-./install.sh --configure-codex
+./masker mcp info
 ```
 
-Restart Codex after installation. The server supports the MCP 2026-07-28 stateless protocol and legacy 2025-era clients over stdio.
+Install and register the server for a supported host:
+
+```sh
+./masker mcp install codex
+./masker mcp install claude
+```
+
+Use `./masker mcp install both` to configure both. Restart the host after installation. The server supports the MCP 2026-07-28 stateless protocol and legacy 2025-era clients over stdio.
 
 ## Discovery Mode
 

@@ -82,11 +82,11 @@ The optional MCP companion lets Codex open Masker, advance between opaque discov
 The core app has no third-party dependencies. Presidio discovery is optional and installs its Python analyzer and English model only when requested. The MCP companion requires Node.js 20 or newer:
 
 ```sh
-cd mcp
-./install.sh --configure-codex
+./masker mcp info
+./masker mcp install codex
 ```
 
-Restart Codex after installation. See [mcp/README.md](mcp/README.md) for the tool list and privacy boundary.
+Use `./masker mcp install claude` for Claude Code or `./masker mcp install both` for both hosts. Restart the host after installation. The setup summary is bundled locally and never fetches agent instructions from the network. See [mcp/README.md](mcp/README.md) for the tool list and privacy boundary.
 
 ## Use it
 
