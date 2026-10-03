@@ -128,8 +128,24 @@ enum WorkflowStore {
     }
 
     static func documents(in folder: URL, excluding excludedFolder: URL? = nil) throws -> [DiscoveryDocument] {
+        try documents(
+            in: folder,
+            excluding: excludedFolder.map { [$0] } ?? [],
+            excludingDirectoryNames: ["masked pdfs"]
+        )
+    }
+
+    static func documents(
+        in folder: URL,
+        excluding excludedFolders: [URL],
+        excludingDirectoryNames: Set<String> = ["masked pdfs"]
+    ) throws -> [DiscoveryDocument] {
         let root = folder.standardizedFileURL
-        let excludedPath = excludedFolder?.standardizedFileURL.path
+        let excludedPaths = excludedFolders.map { $0.standardizedFileURL.path }
+        let excludedNames = Set(excludingDirectoryNames.map { $0.lowercased() })
+        guard !excludedNames.contains(root.lastPathComponent.lowercased()) else {
+            throw WorkflowStoreError.noPDFs
+        }
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .isDirectoryKey, .isHiddenKey]
         guard let enumerator = FileManager.default.enumerator(
             at: root,
@@ -142,14 +158,20 @@ enum WorkflowStore {
         var pdfs: [URL] = []
         for case let url as URL in enumerator {
             let standardized = url.standardizedFileURL
-            if let excludedPath,
-               standardized.path == excludedPath || standardized.path.hasPrefix(excludedPath + "/") {
-                if (try? standardized.resourceValues(forKeys: keys).isDirectory) == true {
+            let values = try? standardized.resourceValues(forKeys: keys)
+            if excludedPaths.contains(where: {
+                standardized.path == $0 || standardized.path.hasPrefix($0 + "/")
+            }) {
+                if values?.isDirectory == true {
                     enumerator.skipDescendants()
                 }
                 continue
             }
-            let values = try? standardized.resourceValues(forKeys: keys)
+            if values?.isDirectory == true,
+               excludedNames.contains(standardized.lastPathComponent.lowercased()) {
+                enumerator.skipDescendants()
+                continue
+            }
             guard values?.isHidden != true,
                   values?.isRegularFile == true,
                   standardized.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame else { continue }

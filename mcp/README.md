@@ -29,8 +29,9 @@ Restart Codex after installation. The server supports the MCP 2026-07-28 statele
 ## Batch Convert
 
 1. Ask the agent to begin Batch Convert, or click **Batch Convert...** in Masker.
-2. Choose a PDF folder and a mask-set JSON in Masker.
-3. Masker processes every PDF recursively and mirrors the hierarchy under `Masked PDFs`.
+2. Choose one or more PDF folders and a mask-set JSON in Masker.
+3. Masker processes every PDF recursively, skips existing `Masked PDFs` folders, and mirrors the selected hierarchies under one shared `Masked PDFs` folder.
 4. Source PDFs are never combined or overwritten.
+5. If Masker is already scanning or converting, the MCP receives `masker_busy_try_again_later`; the active work is never interrupted.
 
 Discovery session data is stored locally with owner-only file permissions. MCP status is written separately and contains no document content or identifying strings.

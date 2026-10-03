@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.11.0 - 2026-10-02
+
+- Enforces one running Masker process and one main window.
+- Keeps an active scan or batch conversion in control when another app or MCP command reaches Masker.
+- Returns an explicit backoff status instead of interrupting busy work.
+- Lets Batch Convert accept multiple source folders in one selection.
+- Writes multi-folder output into one shared `Masked PDFs` hierarchy while preserving each selected folder name.
+- Ignores every directory named `Masked PDFs` during recursive discovery and batch conversion.
+
 ## 1.10.0 - 2026-08-26
 
 - Adds a first-class mask-set manager for values and replacement labels.

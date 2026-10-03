@@ -36,7 +36,8 @@ Read the short development story: [Nothing Personal: I built a local PDF redacto
 - Permanent export that rasterizes visible content and removes the original text layer, interactive forms and annotations, attachments, scripts, layers, and metadata.
 - A small, burned-in Masker attribution footer on exported pages, enabled by default and removable with the export checkbox.
 - Discovery Mode recursively walks PDFs under a folder while one shared mask set grows; navigation has no scan or review gate, and the local session can resume after restart.
-- Batch Convert applies a mask-set JSON to every PDF under a folder, includes PDFs with no matches, and mirrors its subfolders under `Masked PDFs`.
+- Batch Convert accepts one or more selected folders, includes PDFs with no matches, preserves each selected hierarchy under one shared `Masked PDFs` folder, and skips existing `Masked PDFs` trees.
+- Masker keeps one app instance and one main window. MCP commands back off without interrupting an active scan or conversion.
 - An optional MCP companion lets Codex coordinate discovery and batch conversion using opaque IDs and counts without receiving document contents or identifying metadata.
 
 ![Searching for a synthetic name that was not in the original mask set](docs/joe-farmer-search.png)
@@ -72,7 +73,7 @@ Maintainers can create the universal release archive with `./package-release.sh`
 
 Choose **Discovery Mode...** and select a folder. Masker finds every PDF below it, including nested folders. The session starts with the values, labels, and detector settings already in section 2. Move back and forth freely while growing that shared set, then export it from section 2. Discovery is saved locally and can be resumed after restarting Masker.
 
-Choose **Batch Convert...**, select a folder, and select a mask-set JSON. Masker scans every PDF below the folder and automatically applies every match from that set. Separate outputs are written under `Masked PDFs`, with the original subfolder layout preserved; a PDF with no matches is still copied into the output hierarchy. Source PDFs are never combined or overwritten, and the output folder is excluded from later runs.
+Choose **Batch Convert...**, select one or more folders, and select a mask-set JSON. Masker scans every PDF below the selected folders and automatically applies every match from that set. Separate outputs are written under one shared `Masked PDFs` folder, with each selected folder name and its subfolder layout preserved; a PDF with no matches is still copied into the output hierarchy. Source PDFs are never combined or overwritten, and every existing directory named `Masked PDFs` is skipped.
 
 Discovery fingerprints each source PDF when the session starts and refuses to open a document that changed afterward. Batch conversion reports processed and failed counts in the app. Review the mask set before running a batch, then inspect the exported pages before sharing them.
 

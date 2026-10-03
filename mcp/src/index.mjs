@@ -90,6 +90,7 @@ function toolResult(status) {
 function commandIsReflected(command, status, before, documentID) {
   if (status.revision === before.revision) return false;
   if (status.user_action_required === 'resolve_error_in_masker') return true;
+  if (status.user_action_required === 'masker_busy_try_again_later') return true;
   switch (command) {
     case 'new-discovery':
       return status.user_action_required === 'choose_discovery_folder_in_masker' ||
@@ -138,7 +139,7 @@ function registerCommand(server, name, title, description, command, annotations)
 function buildServer() {
   const server = new McpServer({
     name: 'masker',
-    version: '1.8.0',
+    version: '1.11.0',
     description: 'Coordinates Masker discovery and batch conversion without returning PDF text, filenames, paths, mask values, labels, or screenshots.'
   });
 
@@ -205,7 +206,7 @@ function buildServer() {
     server,
     'begin_batch_convert',
     'Begin Batch Convert',
-    'Open Masker so the user can choose a PDF folder and mask-set JSON. Masker processes the hierarchy locally.',
+    'Open Masker so the user can choose one or more PDF folders and a mask-set JSON. Masker processes the selected hierarchies locally and skips existing Masked PDFs folders.',
     'batch-convert',
     { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
   );

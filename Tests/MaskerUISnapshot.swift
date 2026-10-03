@@ -466,6 +466,19 @@ struct MaskerUISnapshot {
         let clearedModel = MaskerModel(userDefaults: testDefaults)
         precondition(clearedModel.recentFiles.isEmpty, "Clear did not remove recent PDFs")
         precondition(clearedModel.stashedValueCount(for: input) == 0, "Clear did not remove saved mask values")
+        clearedModel.isBusy = true
+        clearedModel.handleControlURL(URL(string: "masker://workflow/batch-convert")!)
+        let ordinaryBusyStatus = try JSONDecoder().decode(
+            WorkflowPublicStatus.self,
+            from: Data(contentsOf: WorkflowStore.publicStatusURL)
+        )
+        precondition(
+            ordinaryBusyStatus.workflow == nil &&
+                ordinaryBusyStatus.busy &&
+                ordinaryBusyStatus.userActionRequired == "masker_busy_try_again_later",
+            "An ordinary scan did not publish MCP backoff state"
+        )
+        clearedModel.isBusy = false
         let workflowFolder = output.deletingLastPathComponent()
             .appendingPathComponent("workflow-fixture-\(UUID().uuidString)", isDirectory: true)
         let nestedFolder = workflowFolder.appendingPathComponent("nested/tax", isDirectory: true)
@@ -533,8 +546,63 @@ struct MaskerUISnapshot {
             ),
             "Batch Convert did not preserve the nested output hierarchy"
         )
+
+        let selectedRootA = workflowFolder.appendingPathComponent("selected-a", isDirectory: true)
+        let selectedRootB = workflowFolder.appendingPathComponent("selected-b", isDirectory: true)
+        let selectedRootBNested = selectedRootB.appendingPathComponent("statements", isDirectory: true)
+        let ignoredMaskedFolder = selectedRootA.appendingPathComponent("Masked PDFs", isDirectory: true)
+        try FileManager.default.createDirectory(at: selectedRootA, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: selectedRootBNested, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: ignoredMaskedFolder, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: input,
+            to: selectedRootA.appendingPathComponent("account-a.pdf")
+        )
+        try FileManager.default.copyItem(
+            at: input,
+            to: selectedRootBNested.appendingPathComponent("account-b.pdf")
+        )
+        try FileManager.default.copyItem(
+            at: input,
+            to: ignoredMaskedFolder.appendingPathComponent("old-output.pdf")
+        )
+        let multiFolderOutput = workflowFolder.appendingPathComponent("Masked PDFs", isDirectory: true)
+        reloadedWorkflowModel.runBatchConvert(
+            inputFolders: [selectedRootA, selectedRootB],
+            maskSetURL: batchMaskSet
+        )
+        let multiBatchDeadline = Date().addingTimeInterval(90)
+        while reloadedWorkflowModel.isBusy, Date() < multiBatchDeadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        }
+        precondition(!reloadedWorkflowModel.isBusy, "Multi-folder Batch Convert did not finish")
+        precondition(
+            reloadedWorkflowModel.batchConversionTotal == 2,
+            "Multi-folder Batch Convert included a Masked PDFs hierarchy or missed a selected folder"
+        )
+        precondition(reloadedWorkflowModel.batchConversionFailed == 0, "Multi-folder Batch Convert failed")
+        precondition(
+            FileManager.default.fileExists(
+                atPath: multiFolderOutput.appendingPathComponent("selected-a/account-a_masked.pdf").path
+            ),
+            "Multi-folder Batch Convert did not preserve the first selected folder name"
+        )
+        precondition(
+            FileManager.default.fileExists(
+                atPath: multiFolderOutput.appendingPathComponent("selected-b/statements/account-b_masked.pdf").path
+            ),
+            "Multi-folder Batch Convert did not preserve the second selected folder hierarchy"
+        )
+        reloadedWorkflowModel.isBusy = true
+        reloadedWorkflowModel.handleControlURL(URL(string: "masker://workflow/batch-convert")!)
         let publicStatusData = try Data(contentsOf: WorkflowStore.publicStatusURL)
         let publicStatusText = String(decoding: publicStatusData, as: UTF8.self)
+        let busyStatus = try JSONDecoder().decode(WorkflowPublicStatus.self, from: publicStatusData)
+        precondition(
+            busyStatus.userActionRequired == "masker_busy_try_again_later" && busyStatus.busy,
+            "A workflow command interrupted or failed to back off from a busy Masker instance"
+        )
+        reloadedWorkflowModel.isBusy = false
         precondition(!publicStatusText.contains(workflowFolder.path), "MCP status leaked the workflow folder path")
         precondition(!publicStatusText.contains("Example Person"), "MCP status leaked a mask value")
         precondition(!publicStatusText.contains("first-generated-document"), "MCP status leaked a filename")

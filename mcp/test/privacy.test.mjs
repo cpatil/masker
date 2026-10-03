@@ -69,3 +69,15 @@ test('MCP commands ignore unrelated status written while Masker launches', () =>
     user_action_required: 'scan_or_open_next_document'
   }, before), true);
 });
+
+test('MCP commands return promptly when Masker asks them to back off', () => {
+  const before = { revision: 10, session_id: 'session-a', active_document_id: 'document-001' };
+  const busy = {
+    ...before,
+    revision: 11,
+    busy: true,
+    user_action_required: 'masker_busy_try_again_later'
+  };
+  assert.equal(commandIsReflected('batch-convert', busy, before), true);
+  assert.equal(commandIsReflected('next', busy, before), true);
+});

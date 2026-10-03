@@ -5,10 +5,33 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 #if !SNAPSHOT_TEST
+final class MaskerAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        guard let bundleIdentifier = Bundle.main.bundleIdentifier else { return }
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        guard let existing = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+            .first(where: { $0.processIdentifier != currentPID }) else { return }
+        existing.activate(options: [.activateAllWindows])
+        DispatchQueue.main.async { NSApp.terminate(nil) }
+    }
+
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        if !flag {
+            sender.windows.first?.makeKeyAndOrderFront(nil)
+        }
+        return true
+    }
+}
+
 @main
 struct MaskerApp: App {
+    @NSApplicationDelegateAdaptor(MaskerAppDelegate.self) private var appDelegate
+
     var body: some Scene {
-        WindowGroup {
+        Window("Masker", id: "main") {
             ContentView()
                 .frame(minWidth: 940, minHeight: 680)
         }
@@ -107,6 +130,20 @@ enum MaskSetManagementError: LocalizedError {
 }
 
 final class MaskerModel: ObservableObject {
+    private enum BatchConversionError: LocalizedError {
+        case sourceFoldersTooFarApart
+
+        var errorDescription: String? {
+            "Choose folders from the same parent hierarchy so Masker can create one safe output folder."
+        }
+    }
+
+    private struct BatchInputDocument {
+        let document: DiscoveryDocument
+        let sourceRoot: URL
+        let outputPrefix: String?
+    }
+
     private struct MaskSetExport: Codable {
         let format: String
         let version: Int
@@ -325,6 +362,11 @@ final class MaskerModel: ObservableObject {
             addFiles([url])
             return
         }
+        guard !isBusy else {
+            status = "Masker is busy with the current operation. Nothing was interrupted; try again after it finishes."
+            publishWorkflowStatus(userActionRequired: "masker_busy_try_again_later")
+            return
+        }
         let command = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         let documentID = components?.queryItems?.first(where: { $0.name == "document" })?.value
@@ -410,17 +452,21 @@ final class MaskerModel: ObservableObject {
     }
 
     func beginBatchConvertSelection() {
-        guard !isBusy else { return }
+        guard !isBusy else {
+            status = "Masker is busy with the current operation. Nothing was interrupted; try Batch Convert again later."
+            publishWorkflowStatus(userActionRequired: "masker_busy_try_again_later")
+            return
+        }
 
         let folderPanel = NSOpenPanel()
-        folderPanel.title = "Choose PDFs to Batch Convert"
-        folderPanel.prompt = "Choose Folder"
-        folderPanel.message = "Every PDF in this folder hierarchy will be processed locally."
+        folderPanel.title = "Choose Folders to Batch Convert"
+        folderPanel.prompt = "Choose Folders"
+        folderPanel.message = "Select one or more folders. PDFs inside any Masked PDFs folder are ignored."
         folderPanel.canChooseFiles = false
         folderPanel.canChooseDirectories = true
         folderPanel.canCreateDirectories = false
-        folderPanel.allowsMultipleSelection = false
-        guard folderPanel.runModal() == .OK, let inputFolder = folderPanel.url else { return }
+        folderPanel.allowsMultipleSelection = true
+        guard folderPanel.runModal() == .OK, !folderPanel.urls.isEmpty else { return }
 
         let maskPanel = NSOpenPanel()
         maskPanel.title = "Choose a Mask Set"
@@ -432,18 +478,45 @@ final class MaskerModel: ObservableObject {
         maskPanel.allowsMultipleSelection = false
         guard maskPanel.runModal() == .OK, let maskSetURL = maskPanel.url else { return }
 
-        runBatchConvert(inputFolder: inputFolder, maskSetURL: maskSetURL)
+        runBatchConvert(inputFolders: folderPanel.urls, maskSetURL: maskSetURL)
     }
 
     func runBatchConvert(inputFolder: URL, maskSetURL: URL, outputFolder requestedOutput: URL? = nil) {
-        guard !isBusy else { return }
+        runBatchConvert(inputFolders: [inputFolder], maskSetURL: maskSetURL, outputFolder: requestedOutput)
+    }
+
+    func runBatchConvert(inputFolders: [URL], maskSetURL: URL, outputFolder requestedOutput: URL? = nil) {
+        guard !isBusy else {
+            status = "Masker is busy with the current operation. Nothing was interrupted; try Batch Convert again later."
+            publishWorkflowStatus(userActionRequired: "masker_busy_try_again_later")
+            return
+        }
         do {
             let decoded = try decodedMaskSet(from: Data(contentsOf: maskSetURL, options: .mappedIfSafe))
             let settings = decoded.settings ?? MaskPatternSettings()
-            let root = inputFolder.standardizedFileURL
-            let batchOutput = (requestedOutput ?? root.appendingPathComponent("Masked PDFs", isDirectory: true))
+            let roots = normalizedBatchInputFolders(inputFolders)
+            guard !roots.isEmpty else { throw WorkflowStoreError.noPDFs }
+            let sharedRoot = commonAncestor(of: roots)
+            if roots.count > 1, sharedRoot.path == "/" {
+                throw BatchConversionError.sourceFoldersTooFarApart
+            }
+            let defaultOutputRoot = roots.count == 1 ? roots[0] : sharedRoot
+            let batchOutput = (requestedOutput ?? defaultOutputRoot.appendingPathComponent("Masked PDFs", isDirectory: true))
                 .standardizedFileURL
-            let documents = try WorkflowStore.documents(in: root, excluding: batchOutput)
+            var documents: [BatchInputDocument] = []
+            for root in roots {
+                let rootDocuments: [DiscoveryDocument]
+                do {
+                    rootDocuments = try WorkflowStore.documents(in: root, excluding: [batchOutput])
+                } catch WorkflowStoreError.noPDFs {
+                    continue
+                }
+                let prefix = roots.count > 1 ? WorkflowStore.relativePath(of: root, under: sharedRoot) : nil
+                documents.append(contentsOf: rootDocuments.map {
+                    BatchInputDocument(document: $0, sourceRoot: root, outputPrefix: prefix)
+                })
+            }
+            guard !documents.isEmpty else { throw WorkflowStoreError.noPDFs }
             let entries = decoded.entries
             let terms = entries.map(\.value)
             let options = patternOptions(from: settings)
@@ -470,20 +543,25 @@ final class MaskerModel: ObservableObject {
             batchConversionProcessed = 0
             batchConversionFailed = 0
             isBusy = true
-            status = "Batch converting \(documents.count) PDF\(documents.count == 1 ? "" : "s")..."
+            status = "Batch converting \(documents.count) PDF\(documents.count == 1 ? "" : "s") from \(roots.count) folder\(roots.count == 1 ? "" : "s")..."
             publishWorkflowStatus(userActionRequired: nil)
 
             DispatchQueue.global(qos: .userInitiated).async {
                 var outputs: [URL] = []
                 var failures: [String] = []
-                for (index, document) in documents.enumerated() {
+                for (index, input) in documents.enumerated() {
                     do {
-                        let file = try WorkflowStore.validate(document)
+                        let file = try WorkflowStore.validate(input.document)
                         let found = PDFMasker.scan(files: [file], exactTerms: terms, options: options) { message in
                             DispatchQueue.main.async { self.status = message }
                         }
                         var targetFolder = batchOutput
-                        let relativePath = WorkflowStore.relativePath(of: file, under: root)
+                        if let outputPrefix = input.outputPrefix {
+                            for component in outputPrefix.split(separator: "/") {
+                                targetFolder.appendPathComponent(String(component), isDirectory: true)
+                            }
+                        }
+                        let relativePath = WorkflowStore.relativePath(of: file, under: input.sourceRoot)
                         for component in relativePath.split(separator: "/").dropLast() {
                             targetFolder.appendPathComponent(String(component), isDirectory: true)
                         }
@@ -500,7 +578,7 @@ final class MaskerModel: ObservableObject {
                         }
                         outputs.append(contentsOf: created)
                     } catch {
-                        failures.append(document.id)
+                        failures.append(input.document.id)
                     }
                     DispatchQueue.main.async {
                         self.batchConversionProcessed = index + 1
@@ -531,6 +609,38 @@ final class MaskerModel: ObservableObject {
             showError("Could not start batch conversion: \(error.localizedDescription)")
             publishWorkflowStatus(userActionRequired: "choose_batch_inputs_in_masker")
         }
+    }
+
+    private func normalizedBatchInputFolders(_ folders: [URL]) -> [URL] {
+        let unique = Dictionary(grouping: folders.map(\.standardizedFileURL), by: \.path)
+            .compactMap { $0.value.first }
+            .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        return unique.filter { candidate in
+            !unique.contains { other in
+                other.path != candidate.path && candidate.path.hasPrefix(other.path + "/")
+            }
+        }
+    }
+
+    private func commonAncestor(of folders: [URL]) -> URL {
+        guard var commonComponents = folders.first?.standardizedFileURL.pathComponents else {
+            return URL(fileURLWithPath: "/", isDirectory: true)
+        }
+        for folder in folders.dropFirst() {
+            let components = folder.standardizedFileURL.pathComponents
+            let limit = min(commonComponents.count, components.count)
+            var matchingCount = 0
+            while matchingCount < limit,
+                  commonComponents[matchingCount] == components[matchingCount] {
+                matchingCount += 1
+            }
+            commonComponents = Array(commonComponents.prefix(matchingCount))
+        }
+        var result = URL(fileURLWithPath: "/", isDirectory: true)
+        for component in commonComponents.dropFirst() {
+            result.appendPathComponent(component, isDirectory: true)
+        }
+        return result.standardizedFileURL
     }
 
     func setOutputFolder(_ folder: URL) {
@@ -646,7 +756,7 @@ final class MaskerModel: ObservableObject {
                 version: 1,
                 revision: publicStatusRevision,
                 workflow: nil,
-                state: "idle",
+                state: isBusy ? "busy" : "idle",
                 sessionID: nil,
                 documentCount: 0,
                 documents: [],
@@ -658,7 +768,7 @@ final class MaskerModel: ObservableObject {
                 currentScanned: false,
                 matchCount: nil,
                 selectedMatchCount: nil,
-                busy: false,
+                busy: isBusy,
                 userActionRequired: userActionRequired
             )
             try? WorkflowStore.savePublicStatus(publicStatus)
@@ -1566,7 +1676,7 @@ struct ContentView: View {
                                     } label: {
                                         Label("Batch Convert...", systemImage: "rectangle.stack.badge.play")
                                     }
-                                    .help("Apply a mask-set JSON to every PDF under a folder")
+                                    .help("Apply a mask-set JSON to every PDF under one or more selected folders")
                                 }
                             }
                         }

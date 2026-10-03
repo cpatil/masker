@@ -17,9 +17,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-	<string>1.10.0</string>
+	<string>1.11.0</string>
     <key>CFBundleVersion</key>
-	<string>32</string>
+	<string>33</string>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>
@@ -33,6 +33,8 @@
     </array>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.utilities</string>
+    <key>LSMultipleInstancesProhibited</key>
+    <true/>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
